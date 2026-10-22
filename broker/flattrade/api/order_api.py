@@ -418,11 +418,21 @@ def cancel_all_orders_api(data, auth):
     if order_book_response is None:
         return [], []  # Return empty lists indicating failure to retrieve the order book
 
+    # A FAILED OrderBook read does not come back as a list: it is a bare
+    # {"stat": "Not_Ok", "emsg": ...} dict. Iterating that yields its string
+    # KEYS, so `order.get("status")` raised AttributeError: 'str' object has no
+    # attribute 'get' — OpenAlgo's cancel service turns that into HTTP 500
+    # "Failed to cancel all orders due to internal error" even though there was
+    # nothing pending to cancel. Same shape fix as close_all_positions above.
+    if not isinstance(order_book_response, list):
+        return [], []
+
     # Filter orders still working at the exchange (OPEN / PENDING / TRIGGER_PENDING)
     orders_to_cancel = [
         order
         for order in order_book_response
-        if normalize_order_status(order.get("status")) == "open"
+        if isinstance(order, dict)
+        and normalize_order_status(order.get("status")) == "open"
     ]
     # logger.debug(f"{orders_to_cancel}")
     canceled_orders = []
