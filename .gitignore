@@ -1,0 +1,123 @@
+venopenalgo
+.venv/
+.env
+openalgo.db
+*.db-shm
+*.db-wal
+*.db-journal
+.env
+.flaskenv
+*.pyc
+__pycache__/
+instance/
+.DS_Store
+Thumbs.db
+.vscode/
+.superpowers/
+.idea/
+.claude/settings.json
+.claude/settings.local.json
+.python-version
+config.ini
+.venvv
+.cloudflared/*.json
+
+#DB Files, CSV Files and Log/Tmp Files
+
+# Temporary/debug files
+tmp/
+
+# Numba/LLVMLITE cache directories (auto-created on Linux)
+.numba_cache/
+.llvm_tmp/
+
+*.egg-info/
+*.db
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.log
+*.jsonl
+*.tmp
+checkpoint.txt
+checkpoints.json
+log/ws_proxy_stats.json
+log/test/
+
+
+# Strategy encryption key
+db/strategy_encryption.key
+
+# DB backup files (created by upgrade/rotate_pepper.py and other migrations)
+db/backups/
+
+# CSV Files (except specific data files)
+*.csv
+!symbols.csv
+!all_symbols.csv
+!data/qtyfreeze.csv
+!docs/migration/*.csv
+
+# Environments 
+.env 
+.venv 
+env/ 
+venv/ 
+ENV/ 
+env.bak/ 
+venv.bak/ 
+
+# Node modules (all directories)
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+build/
+.next/
+out/
+
+# Frontend specific
+# frontend/dist/ is built by CI/CD pipeline
+frontend/dist/
+frontend/.cache/
+*.local
+
+# Tailwind CSS output
+# **/output.css
+
+# npm cache
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+#frontend/dist
+
+# Windows NUL file
+nul
+
+# Personal workspace: your own indicators, research, backtests and notes.
+# Only the readme is tracked -- everything else is yours and stays local.
+# NOTE: gitignore is not a secrecy boundary. `git add -f` bypasses it, and
+# the Docker build copies the repo tree, so workspace/ is excluded in
+# .dockerignore too. Real secrets belong in .env or keys/, never here.
+workspace/**
+!workspace/**/
+!workspace/readme.md
+!workspace/**/readme.md
+
+# Environment files, everywhere and in every variant. Plain `.env` was
+# already covered, but `.env.production` / `.env.bak` / `env.backup` were
+# not -- `.env.local` only escaped by accidentally matching `*.local`.
+# A committed secret must be rotated, not just deleted, so cast wide.
+.env.*
+*.env
+env.backup
+!.sample.env
+!**/.sample.env
+# ...but the negation above must not punch a hole in workspace/, whose
+# promise is that only readmes are tracked. Last matching rule wins.
+workspace/**/.sample.env
+
+# Local Git worktrees created for isolated feature and documentation work.
+.worktrees/

@@ -1,0 +1,339 @@
+import { lazy, Suspense } from 'react'
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router'
+import { Providers } from '@/app/providers'
+import { AuthSync } from '@/components/auth/AuthSync'
+import { FullWidthLayout } from '@/components/layout/FullWidthLayout'
+import { Layout } from '@/components/layout/Layout'
+import { PageLoader } from '@/components/ui/page-loader'
+import { usePageTitle } from '@/hooks/usePageTitle'
+import { useBrokerStore } from '@/stores/brokerStore'
+
+// Lazy load all pages for code splitting
+// Public pages
+const Home = lazy(() => import('@/pages/Home'))
+const PortfolioBacktester = lazy(() => import('@/pages/PortfolioBacktester'))
+const PortfolioBacktesterResults = lazy(() => import('@/pages/PortfolioBacktesterResults'))
+const SipBacktester = lazy(() => import('@/pages/SipBacktester'))
+const SipBacktesterResults = lazy(() => import('@/pages/SipBacktesterResults'))
+const PortfolioAnalyzer = lazy(() => import('@/pages/PortfolioAnalyzer'))
+const Faq = lazy(() => import('@/pages/Faq'))
+const Setup = lazy(() => import('@/pages/Setup'))
+const Login = lazy(() => import('@/pages/Login'))
+const ResetPassword = lazy(() => import('@/pages/ResetPassword'))
+const Download = lazy(() => import('@/pages/Download'))
+const ServerError = lazy(() => import('@/pages/ServerError'))
+const RateLimited = lazy(() => import('@/pages/RateLimited'))
+const NotFound = lazy(() => import('@/pages/NotFound'))
+
+// Broker auth
+const BrokerSelect = lazy(() => import('@/pages/BrokerSelect'))
+const BrokerTOTP = lazy(() => import('@/pages/BrokerTOTP'))
+const SamcoAuth = lazy(() => import('@/pages/SamcoAuth'))
+
+// Main pages
+const Dashboard = lazy(() => import('@/pages/Dashboard'))
+const Positions = lazy(() => import('@/pages/Positions'))
+const OrderBook = lazy(() => import('@/pages/OrderBook'))
+const TradeBook = lazy(() => import('@/pages/TradeBook'))
+const Holdings = lazy(() => import('@/pages/Holdings'))
+const Token = lazy(() => import('@/pages/Token'))
+const Search = lazy(() => import('@/pages/Search'))
+const ApiKey = lazy(() => import('@/pages/ApiKey'))
+const AgentIndex = lazy(() => import('@/pages/agent/AgentIndex'))
+const AgentConfig = lazy(() => import('@/pages/agent/AgentConfig'))
+const Profile = lazy(() => import('@/pages/Profile'))
+const MasterContract = lazy(() => import('@/pages/MasterContract'))
+const ActionCenter = lazy(() => import('@/pages/ActionCenter'))
+
+// Platform pages
+const Platforms = lazy(() => import('@/pages/Platforms'))
+const TradingView = lazy(() => import('@/pages/TradingView'))
+const GoCharting = lazy(() => import('@/pages/GoCharting'))
+const PnLTracker = lazy(() => import('@/pages/PnLTracker'))
+
+// Sandbox & Analyzer
+const Sandbox = lazy(() => import('@/pages/Sandbox'))
+const SandboxPnL = lazy(() => import('@/pages/SandboxPnL'))
+const Analyzer = lazy(() => import('@/pages/Analyzer'))
+const WebSocketTest = lazy(() => import('@/pages/WebSocketTest'))
+const WebSocketOrder = lazy(() => import('@/pages/WebSocketOrder'))
+const ChartTest = lazy(() => import('@/pages/ChartTest'))
+const Playground = lazy(() => import('@/pages/Playground'))
+const Trading = lazy(() => import('@/pages/Trading'))
+const Historify = lazy(() => import('@/pages/Historify'))
+const HistorifyCharts = lazy(() => import('@/pages/HistorifyCharts'))
+
+// Tools & Option Chain
+const Tools = lazy(() => import('@/pages/Tools'))
+const OptionChain = lazy(() => import('@/pages/OptionChain'))
+const IVChart = lazy(() => import('@/pages/IVChart'))
+const Scalping = lazy(() => import('@/pages/Scalping'))
+const OITracker = lazy(() => import('@/pages/OITracker'))
+const OIRange = lazy(() => import('@/pages/OIRange'))
+const GammaDensity = lazy(() => import('@/pages/GammaDensity'))
+const MaxPain = lazy(() => import('@/pages/MaxPain'))
+const StraddleChart = lazy(() => import('@/pages/StraddleChart'))
+const CustomStraddle = lazy(() => import('@/pages/CustomStraddle'))
+const VolSurface = lazy(() => import('@/pages/VolSurface'))
+const GEXDashboard = lazy(() => import('@/pages/GEXDashboard'))
+const IVSmile = lazy(() => import('@/pages/IVSmile'))
+const OIProfile = lazy(() => import('@/pages/OIProfile'))
+const Arbitrage = lazy(() => import('@/pages/Arbitrage'))
+const StrategyBuilder = lazy(() => import('@/pages/StrategyBuilder'))
+const StrategyPortfolio = lazy(() => import('@/pages/StrategyPortfolio'))
+
+// Python Strategy pages
+const PythonStrategyIndex = lazy(() => import('@/pages/python-strategy/PythonStrategyIndex'))
+const NewPythonStrategy = lazy(() => import('@/pages/python-strategy/NewPythonStrategy'))
+const EditPythonStrategy = lazy(() => import('@/pages/python-strategy/EditPythonStrategy'))
+const PythonStrategyLogs = lazy(() => import('@/pages/python-strategy/PythonStrategyLogs'))
+const SchedulePythonStrategy = lazy(() => import('@/pages/python-strategy/SchedulePythonStrategy'))
+const PythonStrategyGuide = lazy(() => import('@/pages/python-strategy/PythonStrategyGuide'))
+
+// Strategy module: multi-leg options strategies with risk management
+const StrategyList = lazy(() => import('@/pages/strategy/List'))
+const StrategyWizard = lazy(() => import('@/pages/strategy/Wizard'))
+const StrategyDetail = lazy(() => import('@/pages/strategy/Detail'))
+const StrategyEdit = lazy(() => import('@/pages/strategy/Edit'))
+
+// Chartink pages
+const ChartinkIndex = lazy(() => import('@/pages/chartink/ChartinkIndex'))
+const NewChartinkStrategy = lazy(() => import('@/pages/chartink/NewChartinkStrategy'))
+const ViewChartinkStrategy = lazy(() => import('@/pages/chartink/ViewChartinkStrategy'))
+const ConfigureChartinkSymbols = lazy(() => import('@/pages/chartink/ConfigureChartinkSymbols'))
+
+// Flow pages
+const FlowIndex = lazy(() => import('@/pages/flow/FlowIndex'))
+const FlowEditor = lazy(() => import('@/pages/flow/FlowEditor'))
+const FlowKeyboardShortcuts = lazy(() => import('@/pages/flow/FlowKeyboardShortcuts'))
+
+// Leverage page (crypto brokers only)
+const Leverage = lazy(() => import('@/pages/Leverage'))
+
+/** Route guard: only renders children if leverage_config is true, else redirects to dashboard */
+function LeverageRoute() {
+  const capabilities = useBrokerStore((s) => s.capabilities)
+  if (!capabilities?.leverage_config) {
+    return <Navigate to="/dashboard" replace />
+  }
+  return <Leverage />
+}
+
+/** Route guard: hide Holdings for crypto brokers (no equity holdings concept) */
+function HoldingsRoute() {
+  const capabilities = useBrokerStore((s) => s.capabilities)
+  if (capabilities?.broker_type === 'crypto') {
+    return <Navigate to="/dashboard" replace />
+  }
+  return <Holdings />
+}
+
+// Admin pages
+const AdminIndex = lazy(() => import('@/pages/admin/AdminIndex'))
+const FreezeQty = lazy(() => import('@/pages/admin/FreezeQty'))
+const Holidays = lazy(() => import('@/pages/admin/Holidays'))
+const MarketTimings = lazy(() => import('@/pages/admin/MarketTimings'))
+const Diagnostics = lazy(() => import('@/pages/admin/Diagnostics'))
+const RemoteMcp = lazy(() => import('@/pages/admin/RemoteMcp'))
+
+// Telegram pages
+const TelegramIndex = lazy(() => import('@/pages/telegram/TelegramIndex'))
+const TelegramConfig = lazy(() => import('@/pages/telegram/TelegramConfig'))
+const TelegramUsers = lazy(() => import('@/pages/telegram/TelegramUsers'))
+const TelegramAnalytics = lazy(() => import('@/pages/telegram/TelegramAnalytics'))
+
+// WhatsApp pages
+const WhatsAppIndex = lazy(() => import('@/pages/whatsapp/WhatsAppIndex'))
+
+// Logs & Monitoring pages
+const LogsIndex = lazy(() => import('@/pages/LogsIndex'))
+const LiveLogs = lazy(() => import('@/pages/Logs'))
+const SecurityDashboard = lazy(() => import('@/pages/monitoring/SecurityDashboard'))
+const TrafficDashboard = lazy(() => import('@/pages/monitoring/TrafficDashboard'))
+const LatencyDashboard = lazy(() => import('@/pages/monitoring/LatencyDashboard'))
+const HealthMonitor = lazy(() => import('@/pages/HealthMonitor'))
+
+function PageTitleUpdater() {
+  usePageTitle()
+  return null
+}
+
+function App() {
+  return (
+    <Providers>
+      <BrowserRouter>
+        <PageTitleUpdater />
+        <AuthSync>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              {/* Public routes */}
+              <Route path="/" element={<Home />} />
+              <Route path="/faq" element={<Faq />} />
+              <Route path="/setup" element={<Setup />} />
+              <Route path="/login" element={<Login />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
+              <Route path="/download" element={<Download />} />
+              <Route path="/error" element={<ServerError />} />
+              <Route path="/rate-limited" element={<RateLimited />} />
+
+              {/* Broker auth routes */}
+              <Route path="/broker" element={<BrokerSelect />} />
+              <Route path="/broker/:broker/totp" element={<BrokerTOTP />} />
+              <Route path="/broker/samco/auth" element={<SamcoAuth />} />
+              {/* Dynamic broker TOTP routes for all supported brokers */}
+              <Route path="/:broker/auth" element={<BrokerTOTP />} />
+
+              {/* Protected routes - requires broker auth */}
+              <Route element={<Layout />}>
+                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/positions" element={<Positions />} />
+                <Route path="/orderbook" element={<OrderBook />} />
+                <Route path="/tradebook" element={<TradeBook />} />
+                <Route path="/holdings" element={<HoldingsRoute />} />
+                {/* Search routes - match Flask /search/* routes */}
+                <Route path="/search/token" element={<Token />} />
+                <Route path="/search" element={<Search />} />
+                {/* API Key management */}
+                <Route path="/apikey" element={<ApiKey />} />
+                {/* Phase 4: Charts & Webhook Configuration */}
+                <Route path="/platforms" element={<Platforms />} />
+                <Route path="/tradingview" element={<TradingView />} />
+                <Route path="/portfolio-backtester" element={<PortfolioBacktester />} />
+                <Route
+                  path="/portfolio-backtester/results"
+                  element={<PortfolioBacktesterResults />}
+                />
+                {/* The page moved: /portfolio was ambiguous next to the
+                    analyzer. Redirect rather than 404 an existing bookmark. */}
+                <Route
+                  path="/portfolio"
+                  element={<Navigate to="/portfolio-backtester" replace />}
+                />
+                <Route path="/sip-backtester" element={<SipBacktester />} />
+                <Route path="/sip-backtester/results" element={<SipBacktesterResults />} />
+                <Route path="/portfolio-analyzer" element={<PortfolioAnalyzer />} />
+                <Route path="/gocharting" element={<GoCharting />} />
+                <Route path="/pnl-tracker" element={<PnLTracker />} />
+                {/* Phase 4: Sandbox & Analyzer */}
+                <Route path="/sandbox" element={<Sandbox />} />
+                <Route path="/sandbox/mypnl" element={<SandboxPnL />} />
+                <Route path="/analyzer" element={<Analyzer />} />
+                <Route path="/tools" element={<Tools />} />
+                <Route path="/scalping" element={<Scalping />} />
+                <Route path="/optionchain" element={<OptionChain />} />
+                <Route path="/ivchart" element={<IVChart />} />
+                <Route path="/oitracker" element={<OITracker />} />
+                <Route path="/oirange" element={<OIRange />} />
+                <Route path="/gammadensity" element={<GammaDensity />} />
+                <Route path="/maxpain" element={<MaxPain />} />
+                <Route path="/straddle" element={<StraddleChart />} />
+                <Route path="/straddlepnl" element={<CustomStraddle />} />
+                <Route path="/volsurface" element={<VolSurface />} />
+                <Route path="/gex" element={<GEXDashboard />} />
+                <Route path="/ivsmile" element={<IVSmile />} />
+                <Route path="/oiprofile" element={<OIProfile />} />
+                <Route path="/arbitrage" element={<Arbitrage />} />
+                <Route path="/strategybuilder" element={<StrategyBuilder />} />
+                <Route path="/strategybuilder/portfolio" element={<StrategyPortfolio />} />
+                {/* Legacy /tools/strategy paths — redirect to the new route. */}
+                <Route
+                  path="/tools/strategy"
+                  element={<Navigate to="/strategybuilder" replace />}
+                />
+                <Route
+                  path="/tools/strategy/portfolio"
+                  element={<Navigate to="/strategybuilder/portfolio" replace />}
+                />
+                <Route path="/websocket/test" element={<WebSocketTest />} />
+                <Route path="/websocket/order" element={<WebSocketOrder />} />
+                <Route path="/chart/test" element={<ChartTest />} />
+                <Route path="/websocket/test/20" element={<WebSocketTest depthLevel={20} />} />
+                <Route path="/websocket/test/30" element={<WebSocketTest depthLevel={30} />} />
+                <Route path="/websocket/test/50" element={<WebSocketTest depthLevel={50} />} />
+                {/* Phase 6: Python Strategies */}
+                <Route path="/python" element={<PythonStrategyIndex />} />
+                <Route path="/python/new" element={<NewPythonStrategy />} />
+                <Route path="/python/:strategyId/edit" element={<EditPythonStrategy />} />
+                <Route path="/python/:strategyId/logs" element={<PythonStrategyLogs />} />
+                <Route path="/python/:strategyId/schedule" element={<SchedulePythonStrategy />} />
+                <Route path="/python/guide" element={<PythonStrategyGuide />} />
+                {/* Strategy module. /strategy/new before /strategy/:id so the
+                    literal wins over the parameter. */}
+                <Route path="/strategy" element={<StrategyList />} />
+                <Route path="/strategy/new" element={<StrategyWizard />} />
+                <Route path="/strategy/:strategyId" element={<StrategyDetail />} />
+                <Route path="/strategy/:strategyId/edit" element={<StrategyEdit />} />
+
+                {/* Phase 6: Chartink Strategies */}
+                <Route path="/chartink" element={<ChartinkIndex />} />
+                <Route path="/chartink/new" element={<NewChartinkStrategy />} />
+                <Route path="/chartink/:strategyId" element={<ViewChartinkStrategy />} />
+                <Route
+                  path="/chartink/:strategyId/configure"
+                  element={<ConfigureChartinkSymbols />}
+                />
+                {/* Flow Editor */}
+                <Route path="/flow" element={<FlowIndex />} />
+                <Route path="/flow/shortcuts" element={<FlowKeyboardShortcuts />} />
+                {/* Leverage Configuration (crypto brokers only) */}
+                <Route path="/leverage" element={<LeverageRoute />} />
+                {/* Phase 7: Admin */}
+                <Route path="/admin" element={<AdminIndex />} />
+                <Route path="/admin/freeze" element={<FreezeQty />} />
+                <Route path="/admin/holidays" element={<Holidays />} />
+                <Route path="/admin/timings" element={<MarketTimings />} />
+                <Route path="/admin/diagnostics" element={<Diagnostics />} />
+                <Route path="/admin/remote-mcp" element={<RemoteMcp />} />
+                {/* Phase 7: Telegram */}
+                <Route path="/telegram" element={<TelegramIndex />} />
+                <Route path="/telegram/config" element={<TelegramConfig />} />
+                <Route path="/telegram/users" element={<TelegramUsers />} />
+                <Route path="/telegram/analytics" element={<TelegramAnalytics />} />
+                <Route path="/whatsapp" element={<WhatsAppIndex />} />
+                {/* Phase 7: Logs & Monitoring */}
+                <Route path="/logs" element={<LogsIndex />} />
+                <Route path="/logs/live" element={<LiveLogs />} />
+                <Route path="/logs/sandbox" element={<Analyzer />} />
+                <Route path="/logs/security" element={<SecurityDashboard />} />
+                <Route path="/logs/traffic" element={<TrafficDashboard />} />
+                <Route path="/logs/latency" element={<LatencyDashboard />} />
+                <Route path="/health" element={<HealthMonitor />} />
+                {/* Phase 7: Settings & Action Center */}
+                <Route path="/profile" element={<Profile />} />
+                <Route path="/master-contract" element={<MasterContract />} />
+                <Route path="/action-center" element={<ActionCenter />} />
+              </Route>
+
+              {/* Full-width protected routes */}
+              <Route element={<FullWidthLayout />}>
+                <Route path="/playground" element={<Playground />} />
+                <Route path="/trading" element={<Trading />} />
+                {/* The agent is an application surface, not a document: the
+                    thread scrolls inside a fixed viewport with the composer
+                    pinned under it, and a conversation sidebar sits beside it.
+                    Layout's centred, page-scrolling container cannot hold that,
+                    so it renders its own Navbar like /trading does. */}
+                <Route path="/agent" element={<AgentIndex />} />
+                {/* Config shares the agent's shell rather than Layout's: the
+                    registry and the provider catalog are wide, and a returning
+                    operator moves between the two surfaces without the chrome
+                    changing under them. */}
+                <Route path="/agent/config" element={<AgentConfig />} />
+                <Route path="/historify" element={<Historify />} />
+                <Route path="/historify/charts" element={<HistorifyCharts />} />
+                <Route path="/historify/charts/:symbol" element={<HistorifyCharts />} />
+                {/* Flow Editor (full-width for canvas) */}
+                <Route path="/flow/editor/:id" element={<FlowEditor />} />
+              </Route>
+
+              {/* 404 Not Found */}
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </Suspense>
+        </AuthSync>
+      </BrowserRouter>
+    </Providers>
+  )
+}
+
+export default App
