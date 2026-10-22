@@ -274,13 +274,34 @@ def close_all_positions(current_api_key, auth):
 
     positions_response = get_positions(AUTH_TOKEN)
 
-    # Check if the positions data is null or empty
-    if positions_response is None or positions_response[0]["stat"] == "Not_Ok":
+    # Check if the positions data is null or empty.
+    #
+    # A flat book does NOT always come back as an empty list: the broker can
+    # answer with nothing at all, an empty list, or a bare
+    # {"stat": "Not_Ok", "emsg": ...} dict when there is no position data.
+    # Indexing that dict (`positions_response[0]`) raised KeyError: 0, which
+    # OpenAlgo's close service turns into HTTP 500 "Failed to close positions
+    # due to internal error" — so a genuinely FLAT account was reported as a
+    # failed square-off and every exit path retried it. Normalise all of those
+    # shapes here and report the documented "no open positions" answer.
+    if not positions_response:
         return {"message": "No Open Positions Found"}, 200
 
-    if positions_response:
+    if isinstance(positions_response, dict):
+        positions = [positions_response]
+    else:
+        positions = list(positions_response)
+
+    if (
+        positions
+        and isinstance(positions[0], dict)
+        and positions[0].get("stat") == "Not_Ok"
+    ):
+        return {"message": "No Open Positions Found"}, 200
+
+    if positions:
         # Loop through each position to close
-        for position in positions_response:
+        for position in positions:
             # Skip if net quantity is zero
             if int(position["netqty"]) == 0:
                 continue
