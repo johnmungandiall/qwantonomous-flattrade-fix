@@ -431,7 +431,7 @@ export class MarketDataManager {
         }
       }
 
-      socket.onclose = (event) => {
+      socket.onclose = () => {
         this.socket = null
 
         if (this.connectionState !== 'paused') {
