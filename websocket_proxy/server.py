@@ -17,6 +17,7 @@ from sqlalchemy import text
 from database.auth_db import get_broker_name, verify_api_key
 from services.market_data_service import get_market_data_service
 from utils.logging import get_logger, highlight_url
+from utils.port_reclaim import manual_release_hint, reclaim_port
 
 from .base_adapter import BaseBrokerWebSocketAdapter
 from .broker_factory import create_broker_adapter
@@ -25,7 +26,7 @@ from .mode_utils import (
     normalize_mode,
     normalize_mode_or_none,
 )
-from .port_check import find_available_port, is_port_in_use
+from .port_check import find_available_port
 
 # Initialize logger
 logger = get_logger("websocket_proxy")
@@ -49,19 +50,31 @@ class WebSocketProxy:
         self.host = host
         self.port = port
 
-        # Check if the required port is already in use - wait briefly for cleanup to complete
-        if is_port_in_use(host, port, wait_time=2.0):  # Wait up to 2 seconds for port release
+        # Reclaim the port from a stale copy of THIS app before binding.
+        #
+        # A server that was killed hard - or a WebSocket child orphaned when its
+        # parent app.py died - keeps the listener bound, and the next start used
+        # to crash here with "port 9999 is already in use" until someone hunted
+        # the pid down by hand. reclaim_port stops such a leftover ONLY when it
+        # is provably this project's own process and is no longer serving;
+        # another program (or a live instance) is reported, never killed.
+        _reclaim = reclaim_port(host, port, purpose="websocket")
+        if not _reclaim.reclaimed:
             error_msg = (
                 f"WebSocket port {port} is already in use on {host}.\n"
+                f"{_reclaim.reason}\n"
                 f"This port is required for SDK compatibility (see strategies/ltp_example.py).\n"
                 f"Please:\n"
                 f"1. Stop any other OpenAlgo instances running on port {port}\n"
-                f"2. Kill any processes using port {port}: lsof -ti:{port} | xargs kill -9\n"
+                f"2. Kill the process holding the port:\n"
+                f"{manual_release_hint(port)}\n"
                 f"3. Or wait for the port to be released\n"
                 f"Cannot start WebSocket server with port switching as it would break SDK clients."
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
+        elif _reclaim.killed:
+            logger.info(f"WebSocket port {port} reclaimed: {_reclaim.reason}")
 
         self.clients = {}  # Maps client_id to websocket connection
         self.subscriptions = {}  # Maps client_id to set of subscriptions
@@ -127,16 +140,24 @@ class WebSocketProxy:
         # connection_manager.SharedZmqPublisher.connect.
         ZMQ_HOST = os.getenv("ZMQ_HOST", "127.0.0.1")
         ZMQ_PORT = os.getenv("ZMQ_PORT", "5555")
-        if is_port_in_use(ZMQ_HOST, int(ZMQ_PORT), wait_time=2.0):
+        # Same reclaim as the WebSocket port above, for the same reason: this
+        # SUB is the single binder on the bus, so a leftover holder from a run
+        # that was killed hard blocked startup with an identical RuntimeError.
+        _zmq_reclaim = reclaim_port(ZMQ_HOST, int(ZMQ_PORT), purpose="bus")
+        if not _zmq_reclaim.reclaimed:
             error_msg = (
                 f"ZeroMQ port {ZMQ_PORT} is already in use on {ZMQ_HOST}.\n"
+                f"{_zmq_reclaim.reason}\n"
                 f"Please:\n"
                 f"1. Stop any other OpenAlgo instances running on port {ZMQ_PORT}\n"
-                f"2. Kill any processes using port {ZMQ_PORT}: lsof -ti:{ZMQ_PORT} | xargs kill -9\n"
+                f"2. Kill the process holding the port:\n"
+                f"{manual_release_hint(int(ZMQ_PORT))}\n"
                 f"3. Or wait for the port to be released"
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
+        elif _zmq_reclaim.killed:
+            logger.info(f"ZeroMQ port {ZMQ_PORT} reclaimed: {_zmq_reclaim.reason}")
         self.socket.bind(f"tcp://{ZMQ_HOST}:{ZMQ_PORT}")
 
         # Receive all topics (market data + CACHE_INVALIDATE_*)
@@ -2010,8 +2031,9 @@ async def main():
     proxy = None
 
     try:
-        # Load environment variables
-        load_dotenv()
+        # Load environment variables (utf-8 explicitly: the Windows locale codec
+        # cannot decode UTF-8 punctuation in .env)
+        load_dotenv(encoding="utf-8")
 
         # Get WebSocket configuration from environment variables
         ws_host = os.getenv("WEBSOCKET_HOST", "127.0.0.1")

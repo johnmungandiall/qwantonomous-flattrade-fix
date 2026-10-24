@@ -269,7 +269,7 @@ def start_websocket_server():
 
             from .server import WebSocketProxy
 
-            load_dotenv()
+            load_dotenv(encoding="utf-8")
             ws_host = os.getenv("WEBSOCKET_HOST", "127.0.0.1")
             ws_port = int(os.getenv("WEBSOCKET_PORT", "8765"))
 

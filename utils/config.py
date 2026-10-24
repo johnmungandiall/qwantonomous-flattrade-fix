@@ -5,7 +5,10 @@ import os
 from dotenv import load_dotenv
 
 # Load environment variables from .env file with override=True to ensure values are updated
-load_dotenv(override=True)
+# encoding="utf-8" is explicit: python-dotenv's default is utf-8 already, but
+# naming it keeps every .env read in this project independent of the Windows
+# locale codec (cp1252), which cannot decode UTF-8 punctuation.
+load_dotenv(override=True, encoding="utf-8")
 
 
 def get_broker_api_key() -> str | None:

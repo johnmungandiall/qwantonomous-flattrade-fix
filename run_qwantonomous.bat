@@ -12,6 +12,12 @@ REM  it lives in and cannot go stale again.
 REM ===========================================================================
 setlocal
 
+REM  Force UTF-8 mode BEFORE Python starts. Without this, Python on Windows
+REM  still decodes text files with the locale codec (cp1252), and any .env
+REM  holding a UTF-8 character fails to load with
+REM  "'charmap' codec can't decode byte 0x9d".
+set "PYTHONUTF8=1"
+
 cd /d "%~dp0"
 
 set "PYTHON=%~dp0.venv\Scripts\python.exe"

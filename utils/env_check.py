@@ -126,7 +126,11 @@ def check_env_version_compatibility() -> bool:
     # Read version from .env file
     env_version = None
     try:
-        with open(env_path) as f:
+        # encoding="utf-8" is explicit on purpose: on Windows the default is the
+        # locale codec (cp1252), which raises "'charmap' codec can't decode byte
+        # 0x9d" on any UTF-8 .env carrying a smart quote or en dash - and the
+        # version check then fails for a perfectly valid file.
+        with open(env_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("ENV_CONFIG_VERSION"):
@@ -139,7 +143,7 @@ def check_env_version_compatibility() -> bool:
     # Read version from .sample.env file
     sample_version = None
     try:
-        with open(sample_env_path) as f:
+        with open(sample_env_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("ENV_CONFIG_VERSION"):
@@ -1151,8 +1155,10 @@ def load_and_check_env_variables() -> None:
         print("\nSolution: Copy .sample.env to .env and configure your settings")
         sys.exit(1)
 
-    # Load environment variables from the .env file with override=True to ensure values are updated
-    load_dotenv(dotenv_path=env_path, override=True)
+    # Load environment variables from the .env file with override=True to ensure values are updated.
+    # encoding="utf-8" is explicit: python-dotenv defaults to utf-8, but naming
+    # it keeps the load independent of the Windows locale codec (cp1252).
+    load_dotenv(dotenv_path=env_path, override=True, encoding="utf-8")
 
     # Detect the publicly-known sample APP_KEY/API_KEY_PEPPER values and rotate
     # them to fresh random secrets on first run. Silent no-op for any user

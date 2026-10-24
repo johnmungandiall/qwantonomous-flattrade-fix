@@ -7,6 +7,8 @@ import os
 import re
 import sys
 
+from utils.port_reclaim import manual_release_hint, reclaim_port
+
 
 def _ensure_db_directory() -> None:
     """Create the SQLite database directory before any engine connects.
@@ -1062,6 +1064,28 @@ if __name__ == "__main__":
     host_ip = os.getenv("FLASK_HOST_IP", "127.0.0.1")
     port = int(os.getenv("FLASK_PORT", 5000))
     debug = os.getenv("FLASK_DEBUG", "False").lower() in ("true", "1", "t")
+
+    # Free the HTTP port from a stale copy of THIS app before Flask binds it.
+    #
+    # A previous run killed hard (task manager, closed console, crashed
+    # reloader) leaves the listener bound, and the next start dies with a bare
+    # "[WinError 10048] only one usage of each socket address" traceback.
+    # reclaim_port stops such a leftover only when it is provably this project's
+    # own process AND answers nothing on the port; another program, or a live
+    # instance that still serves requests, is reported instead of killed.
+    _port_reclaim = reclaim_port(host_ip, port, purpose="http")
+    if not _port_reclaim.reclaimed:
+        sys.stderr.write(
+            "\n\033[91m\033[1m"
+            f"REFUSING TO START: HTTP port {port} is not available\033[0m\n"
+            f"\033[91m{_port_reclaim.reason}\n\n"
+            "Free the port, then start again:\n"
+            f"{manual_release_hint(port)}\n"
+            "\033[0m\n"
+        )
+        sys.exit(1)
+    elif _port_reclaim.killed:
+        logger.info(f"HTTP port {port} reclaimed: {_port_reclaim.reason}")
 
     # Refuse to run the Werkzeug debugger on a non-loopback interface.
     # Werkzeug's interactive debugger is an RCE primitive — exposing it on a
