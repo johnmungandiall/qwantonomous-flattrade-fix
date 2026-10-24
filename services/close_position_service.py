@@ -156,7 +156,18 @@ def close_position_with_auth(
         return False, error_response, 500
 
     if status_code == 200:
-        response_data = {"status": "success", "message": "All Open Positions Squared Off"}
+        # Keep the BROKER's own message when it supplied one instead of
+        # rewriting every 200 to the same sentence: the adapter distinguishes a
+        # real sweep from "nothing to close" and from "a close is already
+        # working", and flattening those three into one string hides which one
+        # actually happened. A failure never reaches this branch - a non-200 is
+        # propagated verbatim by the else below.
+        broker_message = (
+            response_code.get("message")
+            if isinstance(response_code, dict) and response_code.get("message")
+            else "All Open Positions Squared Off"
+        )
+        response_data = {"status": "success", "message": broker_message}
         bus.publish(PositionClosedEvent(
             mode="live", api_type=API_TYPE,
             symbol=position_data.get("symbol", ""), exchange=position_data.get("exchange", ""),

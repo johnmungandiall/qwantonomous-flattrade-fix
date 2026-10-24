@@ -1,12 +1,142 @@
 # Mapping OpenAlgo API Request https://openalgo.in/docs
 # Mapping Flattrade Broking Parameters https://piconnect.flattrade.in/docs/
 
+import threading
+import time
+
 from broker.flattrade.api.data import BrokerData
 from database.token_db import get_br_symbol, get_symbol_info
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price, get_instrument_type_from_symbol
+from utils.mpp_slab import (
+    calculate_protected_price,
+    get_instrument_type_from_symbol,
+    round_to_tick_size,
+)
 
 logger = get_logger(__name__)
+
+
+# --- Reference price for MARKET emulation (retry + short TTL cache) ----------
+# The Noren OMS REJECTS raw MKT / SL-MKT for API orders, so every MARKET order
+# is rewritten to a LIMIT priced off a live quote. That quote fetch is therefore
+# the single thing standing between a square-off and a dead order: during the
+# 09:15 exit burst a transient quote failure silently degraded the order to
+# `MKT`, and Flattrade rejected it (`0/390 Rejected`). A retry plus a short-lived
+# per-contract cache makes the quote a best-effort dependency, and if it still
+# cannot be priced the order now FAILS LOUDLY instead of being sent invalid.
+_MPP_CACHE_TTL_SECONDS = 60.0
+_MPP_QUOTE_ATTEMPTS = 2
+_MPP_RETRY_GAP_SECONDS = 0.15
+_mpp_price_cache = {}  # {(symbol, exchange): (quote_dict, monotonic_ts)}
+_mpp_price_cache_lock = threading.Lock()
+
+
+class MPPPriceUnavailable(Exception):
+    """No usable reference price for a MARKET / SL-M order.
+
+    Raised instead of falling back to `MKT`, which this broker's OMS rejects for
+    API orders - a clear failure beats an order that is dead on arrival.
+    """
+
+
+def _remember_quote(symbol, exchange, quote):
+    with _mpp_price_cache_lock:
+        _mpp_price_cache[(symbol, exchange)] = (quote, time.monotonic())
+
+
+def _cached_quote(symbol, exchange):
+    with _mpp_price_cache_lock:
+        entry = _mpp_price_cache.get((symbol, exchange))
+    if not entry:
+        return None
+    quote, stored_at = entry
+    if (time.monotonic() - stored_at) > _MPP_CACHE_TTL_SECONDS:
+        return None
+    return quote
+
+
+def _tick_size_from_master(symbol, exchange):
+    """Tick size from the instrument master, for when the quote omits it."""
+    try:
+        info = get_symbol_info(symbol, exchange)
+        return getattr(info, "tick_size", None)
+    except Exception as error:
+        logger.error(f"MPP: tick size lookup failed for {symbol}@{exchange}: {error}")
+        return None
+
+
+def _reference_quote(symbol, exchange, auth_token):
+    """Best-effort quote for MPP: one short retry, then a recent cached one.
+
+    Returns a dict with ltp / bid / ask / tick_size, or None when nothing usable
+    is available (the caller decides - see [MPPPriceUnavailable]).
+    """
+    last_error = None
+    for attempt in range(_MPP_QUOTE_ATTEMPTS):
+        try:
+            quote = BrokerData(auth_token).get_quotes(symbol, exchange)
+            if quote and float(quote.get("ltp") or 0) > 0:
+                _remember_quote(symbol, exchange, quote)
+                return quote
+            last_error = f"no LTP in quote ({quote})"
+        except Exception as error:
+            last_error = str(error)
+        if attempt + 1 < _MPP_QUOTE_ATTEMPTS:
+            time.sleep(_MPP_RETRY_GAP_SECONDS)
+
+    cached = _cached_quote(symbol, exchange)
+    if cached is not None:
+        logger.warning(
+            f"MPP: live quote unavailable for {symbol}@{exchange} ({last_error}); "
+            f"using cached reference price LTP={cached.get('ltp')} "
+            f"bid={cached.get('bid')} ask={cached.get('ask')}"
+        )
+        return cached
+
+    logger.error(
+        f"MPP: NO reference price for {symbol}@{exchange} ({last_error}) - "
+        f"this MARKET order cannot be priced"
+    )
+    # RAISE, never return a sentinel: the caller must not be able to send a raw
+    # `MKT`, which this broker's OMS rejects for API orders.
+    raise MPPPriceUnavailable(
+        f"no usable quote for {symbol}@{exchange} ({last_error})"
+    )
+
+
+def _marketable_limit_price(quote, action, instrument_type, tick_size):
+    """A limit price that actually crosses the spread.
+
+    MPP alone prices the limit a fixed % away from the LTP, which is fine while
+    the book is calm but can still rest BEHIND the best bid when the premium is
+    moving fast (exactly what a square-off meets). So the protective price is
+    combined with the touch: a SELL never rests above the best bid and a BUY
+    never rests below the best ask. The rounding DIRECTION then keeps that
+    marketability instead of giving half a tick back:
+      SELL -> floor (never rounds UP into an unfillable price)
+      BUY  -> ceil  (never rounds DOWN and fails to reach the offer)
+    """
+    ltp = float(quote.get("ltp") or 0)
+    direction = "ceil" if action == "BUY" else "floor"
+
+    protected = calculate_protected_price(
+        price=ltp,
+        action=action,
+        instrument_type=instrument_type,
+        tick_size=tick_size,
+        round_direction=direction,
+    )
+
+    if action == "BUY":
+        ask = float(quote.get("ask") or 0)
+        if ask > 0 and ask > protected:
+            return round_to_tick_size(ask, tick_size, "ceil")
+    else:
+        bid = float(quote.get("bid") or 0)
+        if bid > 0 and bid < protected:
+            return round_to_tick_size(bid, tick_size, "floor")
+
+    return protected
 
 
 def transform_data(data, token, auth_token=None):
@@ -43,11 +173,13 @@ def transform_data(data, token, auth_token=None):
         )
         try:
             if auth_token:
-                # Create BrokerData instance to fetch quotes
-                broker_data = BrokerData(auth_token)
-
-                # Fetch quotes for the symbol (includes tick_size from API)
-                quote_data = broker_data.get_quotes(data["symbol"], data["exchange"])
+                # Retry + short-TTL cache. The quote is the ONE dependency that
+                # decides whether this MARKET order gets a valid limit price; a
+                # transient failure used to degrade it to `MKT`, which the Noren
+                # OMS rejects for API orders (the 09:15 `0/390 Rejected`).
+                quote_data = _reference_quote(
+                    data["symbol"], data["exchange"], auth_token
+                )
                 logger.info(
                     f"MPP Quote Response: Symbol={data['symbol']}, Exchange={data['exchange']}, "
                     f"LTP={quote_data.get('ltp')}, Bid={quote_data.get('bid')}, Ask={quote_data.get('ask')}, "
@@ -57,8 +189,13 @@ def transform_data(data, token, auth_token=None):
                 # Get instrument type from symbol
                 instrument_type = get_instrument_type_from_symbol(data["symbol"])
 
-                # Get tick_size from quote response
+                # Get tick_size from quote response; fall back to the instrument
+                # master, because tick rounding is what keeps the limit valid.
                 tick_size = quote_data.get("tick_size")
+                if not tick_size:
+                    tick_size = _tick_size_from_master(
+                        data["symbol"], data["exchange"]
+                    )
                 logger.info(
                     f"MPP Symbol Info: InstrumentType={instrument_type}, TickSize={tick_size}"
                 )
@@ -67,13 +204,13 @@ def transform_data(data, token, auth_token=None):
                 ltp = float(quote_data.get("ltp", 0))
 
                 if ltp > 0:
-                    # Calculate protected price using centralized MPP slab with tick size rounding
-                    protected_price = calculate_protected_price(
-                        price=ltp,
-                        action=action,
-                        symbol=data["symbol"],
-                        instrument_type=instrument_type,
-                        tick_size=tick_size,
+                    # Marketable limit: MPP off the LTP, then crossed to the
+                    # touch, then rounded in the direction that STAYS crossing
+                    # (SELL floors, BUY ceils). A plain "% below LTP" can still
+                    # rest behind the bid when the premium is falling fast, and
+                    # nearest-tick rounding gave back half a tick.
+                    protected_price = _marketable_limit_price(
+                        quote_data, action, instrument_type, tick_size
                     )
                     price = str(protected_price)
 
@@ -98,6 +235,10 @@ def transform_data(data, token, auth_token=None):
                     f"MPP Warning: No auth token available for Symbol={data['symbol']}. "
                     f"Cannot fetch quotes for MPP adjustment"
                 )
+        except MPPPriceUnavailable:
+            # Do NOT degrade to a raw `MKT` - the guard below turns this into a
+            # loud failure. Re-raised untouched so the reason survives.
+            raise
         except Exception as e:
             logger.error(
                 f"MPP Error: Failed to apply MPP for Symbol={data['symbol']}, "
@@ -145,6 +286,17 @@ def transform_data(data, token, auth_token=None):
             logger.warning(
                 f"MPP Fallback: quote-based conversion did not run for Symbol={data['symbol']}; "
                 f"sending SL-M->SL-LMT priced off the trigger ({trigger}) at {price}"
+            )
+
+        # A MARKET order with no reference price must NOT go out as `MKT`: this
+        # OMS rejects that price type for API orders, so the order would be dead
+        # on arrival while the caller still believed the position had closed -
+        # which is exactly how three SELLs ended up `0/390 Rejected` at 09:15:24
+        # and the app then entered the opposite leg. Fail loudly instead.
+        if original_type == "MARKET" and order_type != "LMT":
+            raise MPPPriceUnavailable(
+                f"cannot price a MARKET {action} for {data['symbol']} on "
+                f"{data['exchange']} - no usable quote (order NOT sent)"
             )
 
     # Basic mapping - ensure all numeric values are strings

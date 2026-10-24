@@ -112,10 +112,141 @@ def _get_cached_positions(auth):
 
 
 def _invalidate_position_cache(auth):
-    """Invalidate the position cache so the next queued order fetches fresh data."""
+    """Invalidate the position cache so the next caller fetches fresh data."""
     with _position_cache_lock:
         _position_cache.pop(auth, None)
 
+
+# --- Per-account square-off lock ---
+# Serialises close_all_positions per auth token. Two sweeps MUST NOT read the
+# same stale netqty: each would sell the whole long and the second one would
+# open a SHORT - the unintended option-selling defect this guards against.
+# Unlike _symbol_locks this is account-wide, because one sweep touches every
+# position at once.
+_close_locks = {}            # {auth_token: threading.Lock}
+_close_locks_lock = threading.Lock()
+
+# Grace period after cancelling a stale working SELL, before re-reading the
+# books. Flattrade needs a moment to release the cancelled quantity (the same
+# reason smarts orders invalidate the cache after placing).
+_CLOSE_CANCEL_SETTLE = 0.15
+
+
+def _get_close_lock(auth):
+    """Get or create the per-account square-off lock."""
+    key = auth or ""
+    with _close_locks_lock:
+        if key not in _close_locks:
+            _close_locks[key] = threading.Lock()
+        return _close_locks[key]
+
+
+# --- Read-vs-empty distinction ---
+# Noren answers a book request with a bare {"stat": "Not_Ok", "emsg": ...} dict
+# when it has nothing to return. That shape means EMPTY only when emsg says so
+# ("Error Occurred : 5 \"no data\""); every other Not_Ok - Session Expired, auth
+# failure, a gateway error - is a genuine READ FAILURE. Collapsing the two into
+# "0" is how a close or a smart order used to act on a book it could not see.
+_EMPTY_BOOK_MARKERS = ("no data",)
+
+
+class BrokerReadError(Exception):
+    """A Flattrade book read genuinely failed (as opposed to being empty)."""
+
+
+def _as_int(value):
+    """Tolerant int for Noren's string numbers ("75", "75.0", "", None)."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_empty_book_response(response):
+    """True only when a Not_Ok reply specifically means "there are no rows"."""
+    if not isinstance(response, dict) or response.get("stat") != "Not_Ok":
+        return False
+    emsg = str(response.get("emsg") or response.get("message") or "").lower()
+    return any(marker in emsg for marker in _EMPTY_BOOK_MARKERS)
+
+
+def _read_book(response, what):
+    """Normalise a Noren book reply to a list of rows, or raise BrokerReadError.
+
+    [] is a genuinely EMPTY book; raising is the only way to say "I could not
+    read it", so a caller can never mistake one for the other.
+    """
+    if response is None:
+        raise BrokerReadError(f"{what} unavailable (no response from broker)")
+    if isinstance(response, list):
+        return [row for row in response if isinstance(row, dict)]
+    if isinstance(response, dict):
+        if _is_empty_book_response(response):
+            return []
+        if response.get("stat") == "Not_Ok":
+            detail = response.get("emsg") or response.get("message") or "unknown error"
+            raise BrokerReadError(f"{what} read failed ({detail})")
+        # A single-row reply: some Noren endpoints answer with the row itself.
+        return [response]
+    raise BrokerReadError(
+        f"{what} read failed (unexpected reply type {type(response).__name__})"
+    )
+
+
+def _position_key(position):
+    """Join key between a position row and an order-book row (both RAW Noren)."""
+    return (position.get("tsym"), position.get("exch"), position.get("prd"))
+
+
+def _working_sell_orders(order_book_rows):
+    """WORKING SELLs, keyed by (tsym, exch, prd) -> [{orderid, remaining}].
+
+    Both books carry RAW Noren values here (tsym/exch/prd are not mapped), so
+    the keys compare directly. `qty` minus `fillshares` is what is still
+    working - the same filled/pending split the order-update adapter uses.
+
+    The ORDER IDS matter: a SELL left working by an earlier sweep was priced
+    off a premium that has since moved, so it may never fill. A later sweep
+    must CANCEL it and re-price rather than skip the leg - skipping leaves the
+    position open for ever and a retry loop can never converge.
+    """
+    working = {}
+    for order in order_book_rows:
+        if str(order.get("trantype") or "").strip().upper() != "S":
+            continue
+        if normalize_order_status(order.get("status")) != "open":
+            continue
+        remaining = _as_int(order.get("qty")) - _as_int(order.get("fillshares"))
+        if remaining <= 0:
+            continue
+        key = (order.get("tsym"), order.get("exch"), order.get("prd"))
+        working.setdefault(key, []).append(
+            {"orderid": order.get("norenordno"), "remaining": remaining}
+        )
+    return working
+
+
+def _cancel_orders(order_ids, auth):
+    """Best-effort cancel; returns the ids the broker really cancelled."""
+    cancelled = []
+    for order_id in order_ids:
+        if not order_id:
+            continue
+        try:
+            response, status_code = cancel_order(order_id, auth)
+            if status_code == 200:
+                cancelled.append(order_id)
+            else:
+                logger.warning(
+                    f"close_all_positions: could not cancel stale order "
+                    f"{order_id} ({response})"
+                )
+        except Exception as error:
+            logger.error(
+                f"close_all_positions: cancel of stale order {order_id} "
+                f"threw: {error}"
+            )
+    return cancelled
 
 
 def get_open_position(tradingsymbol, exchange, producttype, auth):
@@ -125,26 +256,23 @@ def get_open_position(tradingsymbol, exchange, producttype, auth):
 
     logger.debug(f"{positions_data}")
 
-    net_qty = "0"
+    # An UNREADABLE book is NOT a flat one: BrokerReadError propagates so the
+    # caller refuses to trade on a book it cannot actually see. Only a
+    # genuinely EMPTY book reaches the summing loop below and yields "0".
+    positions = _read_book(positions_data, "Flattrade position book")
 
-    if positions_data is None or (
-        isinstance(positions_data, dict) and (positions_data["stat"] == "Not_Ok")
-    ):
-        # Handle the case where there is no data
-        logger.debug("No data available.")
-        net_qty = "0"
+    # Sum every matching row: a leg can appear more than once, and reading only
+    # the first match under-reports the position.
+    net_qty = 0
+    for position in positions:
+        if (
+            position.get("tsym") == tradingsymbol
+            and position.get("exch") == exchange
+            and position.get("prd") == producttype
+        ):
+            net_qty += _as_int(position.get("netqty"))
 
-    if positions_data and isinstance(positions_data, list):
-        for position in positions_data:
-            if (
-                position.get("tsym") == tradingsymbol
-                and position.get("exch") == exchange
-                and position.get("prd") == producttype
-            ):
-                net_qty = position.get("netqty", "0")
-                break  # Assuming you need the first match
-
-    return net_qty
+    return str(net_qty)
 
 
 def place_order_api(data, auth):
@@ -193,10 +321,36 @@ def place_smartorder_api(data, auth):
     with symbol_lock:
         position_size = int(data.get("position_size", "0"))
 
-        # Get current open position for the symbol
+        # Read a FRESH book: a book cached before the previous fill would make
+        # this order's delta too large (it still shows the pre-fill quantity).
+        _invalidate_position_cache(AUTH_TOKEN)
+
+        # Get current open position for the symbol. Raises BrokerReadError on a
+        # genuine read failure - never silently treated as flat.
         current_position = int(
             get_open_position(symbol, exchange, map_product_type(product), AUTH_TOKEN)
         )
+
+        # A target on the FAR side of zero would FLIP the position (a long sold
+        # past flat becomes a short). A "reduce to size" request never means
+        # that, so clamp to flat unless the caller explicitly opts in with
+        # allow_flip. This is the last line of defence against an unintended
+        # option SELL, independent of whatever the caller computed.
+        allow_flip = str(data.get("allow_flip") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        flipping = (current_position > 0 and position_size < 0) or (
+            current_position < 0 and position_size > 0
+        )
+        if flipping and not allow_flip:
+            logger.warning(
+                f"place_smartorder_api: target position {position_size} would flip "
+                f"the {current_position} position on {symbol}; clamping to flat "
+                f"(pass allow_flip=true to override)"
+            )
+            position_size = 0
 
         logger.debug(f"position_size : {position_size}")
         logger.debug(f"Open Position : {current_position}")
@@ -269,50 +423,145 @@ def place_smartorder_api(data, auth):
 
 
 def close_all_positions(current_api_key, auth):
-    # Fetch the current open positions
+    """Square off every open position, exactly once.
+
+    Serialised per account and DE-DUPLICATED against orders already working at
+    the broker. Without both guards a second sweep reads the same stale netqty,
+    sells the same long again and takes the account through zero into a SHORT -
+    the unintended option-selling defect this function now prevents.
+
+    Returns (payload, status_code). A non-200 is a REAL failure (unreadable
+    book, or a close order the broker rejected) and is propagated to the caller
+    instead of being reported as a successful square-off.
+    """
     AUTH_TOKEN = auth
 
-    positions_response = get_positions(AUTH_TOKEN)
+    with _get_close_lock(AUTH_TOKEN):
+        # Never decide from a book cached before a previous close landed.
+        _invalidate_position_cache(AUTH_TOKEN)
 
-    # Check if the positions data is null or empty.
-    #
-    # A flat book does NOT always come back as an empty list: the broker can
-    # answer with nothing at all, an empty list, or a bare
-    # {"stat": "Not_Ok", "emsg": ...} dict when there is no position data.
-    # Indexing that dict (`positions_response[0]`) raised KeyError: 0, which
-    # OpenAlgo's close service turns into HTTP 500 "Failed to close positions
-    # due to internal error" — so a genuinely FLAT account was reported as a
-    # failed square-off and every exit path retried it. Normalise all of those
-    # shapes here and report the documented "no open positions" answer.
-    if not positions_response:
-        return {"message": "No Open Positions Found"}, 200
+        try:
+            positions = _read_book(get_positions(AUTH_TOKEN), "Flattrade position book")
+        except BrokerReadError as error:
+            logger.error(f"close_all_positions: {error}")
+            return {"status": "error", "message": str(error)}, 500
+        except Exception as error:  # network / decode / broker 5xx
+            logger.exception(f"close_all_positions: position book error: {error}")
+            return {
+                "status": "error",
+                "message": f"Position book unavailable ({error})",
+            }, 500
 
-    if isinstance(positions_response, dict):
-        positions = [positions_response]
-    else:
-        positions = list(positions_response)
+        # A genuinely empty book (or every row already flat) is a soft no-op.
+        if not positions:
+            return {"message": "No Open Positions Found"}, 200
 
-    if (
-        positions
-        and isinstance(positions[0], dict)
-        and positions[0].get("stat") == "Not_Ok"
-    ):
-        return {"message": "No Open Positions Found"}, 200
+        # A working SELL left behind by an EARLIER sweep was priced off a
+        # premium that has since moved, so it may never fill. Skipping the leg
+        # would leave the position open for ever and a retry loop could never
+        # converge, so those orders are CANCELLED first and the close is then
+        # re-priced against the current book.
+        # Without a readable order book we cannot tell whether a close is already
+        # working, so a sweep would risk overselling. Refuse instead.
+        try:
+            working_sells = _working_sell_orders(
+                _read_book(get_order_book(AUTH_TOKEN), "Flattrade order book")
+            )
+        except BrokerReadError as error:
+            logger.error(f"close_all_positions: refusing to close blind: {error}")
+            return {"status": "error", "message": str(error)}, 500
+        except Exception as error:
+            logger.exception(f"close_all_positions: order book error: {error}")
+            return {
+                "status": "error",
+                "message": f"Order book unavailable ({error})",
+            }, 500
 
-    if positions:
+        # Cancel any working SELL that would block (or double-count against) the
+        # close we are about to place for the SAME contract.
+        stale_ids = []
+        for position in positions:
+            if _as_int(position.get("netqty")) <= 0:
+                continue
+            for order in working_sells.get(_position_key(position), []):
+                stale_ids.append(order["orderid"])
+
+        cancelled_ids = _cancel_orders(stale_ids, AUTH_TOKEN) if stale_ids else []
+        if cancelled_ids:
+            logger.warning(
+                f"close_all_positions: cancelled {len(cancelled_ids)} stale working "
+                f"SELL(s) {cancelled_ids} so the close can be re-priced"
+            )
+            # Let the broker release the cancelled quantity, then decide from a
+            # FRESH position book + order book - never from the pre-cancel view.
+            time.sleep(_CLOSE_CANCEL_SETTLE)
+            _invalidate_position_cache(AUTH_TOKEN)
+            try:
+                positions = _read_book(
+                    get_positions(AUTH_TOKEN), "Flattrade position book"
+                )
+                working_sells = _working_sell_orders(
+                    _read_book(get_order_book(AUTH_TOKEN), "Flattrade order book")
+                )
+            except BrokerReadError as error:
+                logger.error(
+                    f"close_all_positions: re-read after cancel failed: {error}"
+                )
+                return {"status": "error", "message": str(error)}, 500
+
+        closed = []
+        covered = []
+        failures = []
+
         # Loop through each position to close
         for position in positions:
             # Skip if net quantity is zero
-            if int(position["netqty"]) == 0:
+            net_qty = _as_int(position.get("netqty"))
+            if net_qty == 0:
                 continue
 
-            # Determine action based on net quantity
-            action = "SELL" if int(position["netqty"]) > 0 else "BUY"
-            quantity = abs(int(position["netqty"]))
-
             # get openalgo symbol to send to placeorder function
-            symbol = get_symbol(position["token"], position["exch"])
+            symbol = get_symbol(position.get("token"), position.get("exch"))
+            if not symbol:
+                logger.error(
+                    f"close_all_positions: no OpenAlgo symbol for token "
+                    f"{position.get('token')} on {position.get('exch')}"
+                )
+                failures.append(
+                    {
+                        "symbol": position.get("tsym"),
+                        "message": "symbol lookup failed",
+                    }
+                )
+                continue
             logger.debug(f"The Symbol is {symbol}")
+
+            # Determine action based on net quantity
+            action = "SELL" if net_qty > 0 else "BUY"
+            quantity = abs(net_qty)
+
+            if net_qty > 0:
+                # A long: subtract whatever a working SELL the broker would NOT
+                # let us cancel still covers, so this sweep can never take the
+                # position through zero. pop() consumes the key so a second row
+                # for the same contract cannot double-count the same order.
+                key = _position_key(position)
+                still_working = sum(
+                    order["remaining"]
+                    for order in working_sells.pop(key, [])
+                )
+                if still_working:
+                    quantity -= still_working
+                    if quantity <= 0:
+                        logger.info(
+                            f"close_all_positions: {symbol} still covered by a "
+                            f"working SELL for {still_working} that could not be "
+                            f"cancelled - not selling again (netqty {net_qty})"
+                        )
+                        covered.append(
+                            {"symbol": symbol, "working_sell_qty": still_working}
+                        )
+                        continue
 
             # Prepare the order payload
             place_order_payload = {
@@ -320,24 +569,89 @@ def close_all_positions(current_api_key, auth):
                 "strategy": "Squareoff",
                 "symbol": symbol,
                 "action": action,
-                "exchange": position["exch"],
+                "exchange": position.get("exch"),
                 "pricetype": "MARKET",
-                "product": reverse_map_product_type(position["prd"]),
+                "product": reverse_map_product_type(position.get("prd")),
                 "quantity": str(quantity),
             }
 
             logger.debug(f"{place_order_payload}")
 
-            # Place the order to close the position
-            res, response, orderid = place_order_api(place_order_payload, auth)
+            # Place the order to close the position and HONOUR the result: a
+            # rejected close must surface as a failure, not as a silent "success".
+            try:
+                res, response, orderid = place_order_api(place_order_payload, auth)
+            except Exception as error:
+                logger.exception(
+                    f"close_all_positions: {symbol} close threw: {error}"
+                )
+                failures.append({"symbol": symbol, "message": str(error)})
+                continue
 
-            # logger.debug(f"{res}")
-            # logger.debug(f"{response}")
-            # logger.debug(f"{orderid}")
+            stat = response.get("stat") if isinstance(response, dict) else None
+            http_status = getattr(res, "status", None)
+            if http_status == 200 and stat == "Ok":
+                closed.append(
+                    {
+                        "symbol": symbol,
+                        "action": action,
+                        "quantity": quantity,
+                        "orderid": orderid,
+                    }
+                )
+            else:
+                detail = (
+                    (response.get("emsg") or response.get("message"))
+                    if isinstance(response, dict)
+                    else None
+                )
+                logger.error(
+                    f"close_all_positions: {symbol} close REJECTED "
+                    f"(http={http_status} stat={stat} {detail})"
+                )
+                failures.append(
+                    {
+                        "symbol": symbol,
+                        "message": detail or "broker rejected the close order",
+                        "http_status": http_status,
+                        "stat": stat,
+                    }
+                )
 
-            # Note: Ensure place_order_api handles any errors and logs accordingly
+        # The book changed - never let a stale snapshot feed the next caller.
+        _invalidate_position_cache(AUTH_TOKEN)
 
-    return {"status": "success", "message": "All Open Positions SquaredOff"}, 200
+        if failures:
+            logger.error(
+                f"close_all_positions: {len(failures)} close order(s) failed: {failures}"
+            )
+            return {
+                "status": "error",
+                "message": f"{len(failures)} close order(s) failed: "
+                + "; ".join(
+                    f"{f.get('symbol')}: {f.get('message')}" for f in failures
+                ),
+                "closed": closed,
+                "failed": failures,
+            }, 500
+
+        if closed:
+            return {
+                "status": "success",
+                "message": "All Open Positions SquaredOff",
+                "closed": closed,
+            }, 200
+
+        if covered:
+            # Every open long is already covered by a working SELL: nothing was
+            # sent, and nothing more may be sent without overselling.
+            return {
+                "status": "success",
+                "message": "Close already working for every open position",
+                "covered": covered,
+            }, 200
+
+        return {"message": "No Open Positions Found"}, 200
 
 
 def cancel_order(orderid, auth):

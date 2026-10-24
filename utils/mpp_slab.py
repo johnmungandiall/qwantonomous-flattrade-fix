@@ -5,6 +5,7 @@
 # When brokers stop supporting market orders, this converts MARKET orders to LIMIT orders
 # with a price buffer based on configurable protection percentages.
 
+import math
 from typing import Optional
 
 from utils.logging import get_logger
@@ -100,28 +101,47 @@ def get_mpp_percentage(price: float, instrument_type: str = "EQ") -> float:
             return percentage
 
 
-def round_to_tick_size(price: float, tick_size: float = None) -> float:
+def round_to_tick_size(price: float, tick_size: float = None, direction: str = "nearest") -> float:
     """
-    Round price to the nearest valid tick size.
+    Round price to a valid tick size.
 
     Args:
         price: The calculated price
         tick_size: The tick size for the instrument (from database)
+        direction: "nearest" (default, every pre-existing caller), "floor" or
+            "ceil". MARKET orders emulate a limit, so the rounding DIRECTION is
+            what decides whether the limit stays marketable: a SELL that rounds
+            UP by half a tick can sit unfilled behind the bid.
 
     Returns:
-        float: Price rounded to nearest tick size, or 2 decimal places if no tick size
+        float: Price rounded to the requested tick, or 2 decimal places if no
+        tick size is known
 
     Example:
         >>> round_to_tick_size(102.0111, 0.05)  # Returns 102.0
         >>> round_to_tick_size(102.0111, 0.01)  # Returns 102.01
         >>> round_to_tick_size(102.0111, None)  # Returns 102.01 (2 decimal places)
+        >>> round_to_tick_size(97.98, 0.05, "floor")  # Returns 97.95
     """
+    mode = (direction or "nearest").lower()
+
     if tick_size is None or tick_size <= 0:
         # No tick size available, just round to 2 decimal places
+        if mode == "floor":
+            return round(math.floor(round(price * 100, 6)) / 100, 2)
+        if mode == "ceil":
+            return round(math.ceil(round(price * 100, 6)) / 100, 2)
         return round(price, 2)
 
-    # Round to nearest tick size
-    rounded = round(price / tick_size) * tick_size
+    # `round(..., 6)` first: 102.0/0.05 is 2039.9999999999998 in binary float,
+    # and flooring that naive value would drop a whole tick.
+    ticks = round(price / tick_size, 6)
+    if mode == "floor":
+        rounded = math.floor(ticks) * tick_size
+    elif mode == "ceil":
+        rounded = math.ceil(ticks) * tick_size
+    else:
+        rounded = round(ticks) * tick_size
 
     # Ensure 2 decimal places for display
     return round(rounded, 2)
@@ -134,6 +154,7 @@ def calculate_protected_price(
     instrument_type: str = None,
     tick_size: float = None,
     custom_percentage: float = None,
+    round_direction: str = "nearest",
 ) -> float:
     """
     Calculate the protected limit price for a market order with tick size rounding.
@@ -178,8 +199,10 @@ def calculate_protected_price(
         protected_price = price * (1 - multiplier)
         adjustment_type = "-"
 
-    # Round to tick size
-    protected_price = round_to_tick_size(protected_price, tick_size)
+    # Round to tick size. The direction matters: a marketable SELL must round
+    # DOWN and a marketable BUY must round UP, so protection is never eaten by
+    # half a tick of rounding toward the market.
+    protected_price = round_to_tick_size(protected_price, tick_size, round_direction)
 
     logger.info(
         f"MPP Calculation: Symbol={symbol or 'N/A'}, InstrumentType={instrument_type}, "
