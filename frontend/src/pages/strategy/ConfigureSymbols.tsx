@@ -78,7 +78,7 @@ export default function ConfigureSymbols() {
       setStrategy(data.strategy)
       setMappings(data.mappings || [])
     } catch (_error) {
-      showToast.error('Failed to load strategy', 'strategy')
+      showToast.error('Failed to load strategy')
     } finally {
       setLoading(false)
     }
@@ -129,19 +129,19 @@ export default function ConfigureSymbols() {
     e.preventDefault()
 
     if (!selectedSymbol) {
-      showToast.error('Please select a symbol', 'strategy')
+      showToast.error('Please select a symbol')
       return
     }
     if (!exchange) {
-      showToast.error('Please select an exchange', 'strategy')
+      showToast.error('Please select an exchange')
       return
     }
     if (!quantity || Number(quantity) < 1) {
-      showToast.error('Quantity must be at least 1', 'strategy')
+      showToast.error('Quantity must be at least 1')
       return
     }
     if (!productType) {
-      showToast.error('Please select a product type', 'strategy')
+      showToast.error('Please select a product type')
       return
     }
 
@@ -155,7 +155,7 @@ export default function ConfigureSymbols() {
       })
 
       if (response.status === 'success') {
-        showToast.success('Symbol added successfully', 'strategy')
+        showToast.success('Symbol added successfully')
         // Reset form
         setSelectedSymbol(null)
         setSymbolSearch('')
@@ -165,10 +165,10 @@ export default function ConfigureSymbols() {
         // Refresh mappings
         fetchStrategy()
       } else {
-        showToast.error(response.message || 'Failed to add symbol', 'strategy')
+        showToast.error(response.message || 'Failed to add symbol')
       }
     } catch (_error) {
-      showToast.error('Failed to add symbol', 'strategy')
+      showToast.error('Failed to add symbol')
     } finally {
       setSubmitting(false)
     }
@@ -178,7 +178,7 @@ export default function ConfigureSymbols() {
     e.preventDefault()
 
     if (!csvData.trim()) {
-      showToast.error('Please enter CSV data', 'strategy')
+      showToast.error('Please enter CSV data')
       return
     }
 
@@ -189,16 +189,15 @@ export default function ConfigureSymbols() {
       if (response.status === 'success') {
         const { added = 0, failed = 0 } = response.data || {}
         showToast.success(
-          `Added ${added} symbols${failed > 0 ? `, ${failed} failed` : ''}`,
-          'strategy'
+          `Added ${added} symbols${failed > 0 ? `, ${failed} failed` : ''}`
         )
         setCsvData('')
         fetchStrategy()
       } else {
-        showToast.error(response.message || 'Failed to add symbols', 'strategy')
+        showToast.error(response.message || 'Failed to add symbols')
       }
     } catch (_error) {
-      showToast.error('Failed to add symbols', 'strategy')
+      showToast.error('Failed to add symbols')
     } finally {
       setSubmitting(false)
     }
@@ -211,12 +210,12 @@ export default function ConfigureSymbols() {
       const response = await strategyApi.deleteSymbolMapping(Number(strategyId), mappingToDelete)
       if (response.status === 'success') {
         setMappings(mappings.filter((m) => m.id !== mappingToDelete))
-        showToast.success('Symbol removed', 'strategy')
+        showToast.success('Symbol removed')
       } else {
-        showToast.error(response.message || 'Failed to remove symbol', 'strategy')
+        showToast.error(response.message || 'Failed to remove symbol')
       }
     } catch (_error) {
-      showToast.error('Failed to remove symbol', 'strategy')
+      showToast.error('Failed to remove symbol')
     } finally {
       setDeleteDialogOpen(false)
       setMappingToDelete(null)

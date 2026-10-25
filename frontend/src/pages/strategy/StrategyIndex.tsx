@@ -39,7 +39,7 @@ export default function StrategyIndex() {
       const data = await strategyApi.getStrategies()
       setStrategies(data)
     } catch (_error) {
-      showToast.error('Failed to load strategies', 'strategy')
+      showToast.error('Failed to load strategies')
     } finally {
       setLoading(false)
     }

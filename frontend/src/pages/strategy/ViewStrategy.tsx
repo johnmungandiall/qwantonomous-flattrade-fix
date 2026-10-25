@@ -67,7 +67,7 @@ export default function ViewStrategy() {
       setStrategy(data.strategy)
       setMappings(data.mappings || [])
     } catch (_error) {
-      showToast.error('Failed to load strategy', 'strategy')
+      showToast.error('Failed to load strategy')
       navigate('/strategy')
     } finally {
       setLoading(false)
@@ -117,14 +117,13 @@ export default function ViewStrategy() {
       if (response.status === 'success') {
         setStrategy({ ...strategy, is_active: response.data?.is_active ?? !strategy.is_active })
         showToast.success(
-          response.data?.is_active ? 'Strategy activated' : 'Strategy deactivated',
-          'strategy'
+          response.data?.is_active ? 'Strategy activated' : 'Strategy deactivated'
         )
       } else {
-        showToast.error(response.message || 'Failed to toggle strategy', 'strategy')
+        showToast.error(response.message || 'Failed to toggle strategy')
       }
     } catch (_error) {
-      showToast.error('Failed to toggle strategy', 'strategy')
+      showToast.error('Failed to toggle strategy')
     } finally {
       setToggling(false)
     }
@@ -136,13 +135,13 @@ export default function ViewStrategy() {
       setDeleting(true)
       const response = await strategyApi.deleteStrategy(strategy.id)
       if (response.status === 'success') {
-        showToast.success('Strategy deleted successfully', 'strategy')
+        showToast.success('Strategy deleted successfully')
         navigate('/strategy')
       } else {
-        showToast.error(response.message || 'Failed to delete strategy', 'strategy')
+        showToast.error(response.message || 'Failed to delete strategy')
       }
     } catch (_error) {
-      showToast.error('Failed to delete strategy', 'strategy')
+      showToast.error('Failed to delete strategy')
     } finally {
       setDeleting(false)
       setDeleteDialogOpen(false)
@@ -155,12 +154,12 @@ export default function ViewStrategy() {
       const response = await strategyApi.deleteSymbolMapping(strategy.id, mappingId)
       if (response.status === 'success') {
         setMappings(mappings.filter((m) => m.id !== mappingId))
-        showToast.success('Symbol mapping deleted', 'strategy')
+        showToast.success('Symbol mapping deleted')
       } else {
-        showToast.error(response.message || 'Failed to delete mapping', 'strategy')
+        showToast.error(response.message || 'Failed to delete mapping')
       }
     } catch (_error) {
-      showToast.error('Failed to delete mapping', 'strategy')
+      showToast.error('Failed to delete mapping')
     }
   }
 

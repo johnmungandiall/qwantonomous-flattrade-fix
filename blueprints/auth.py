@@ -18,6 +18,7 @@ from flask import (
 )
 from flask_wtf.csrf import generate_csrf
 
+from blueprints.react_app import is_react_frontend_available, serve_react_app
 from database.auth_db import auth_cache, feed_token_cache, upsert_auth
 from database.settings_db import get_smtp_settings, set_smtp_settings
 from database.user_db import (  # Import the function
@@ -361,21 +362,28 @@ def login():
                               failure_reason="invalid_credentials")
             return jsonify({"status": "error", "message": "Invalid credentials"}), 401
 
-    # Handle GET requests - redirect to React frontend
+    # Handle GET requests - redirect to React frontend.
+    # Every target below is a react_bp route, and app.py only registers react_bp
+    # when the build exists. Without it, redirecting to /login sent the browser
+    # to the URL it had just requested (endless /login -> /login) and /setup
+    # answered 405, because GET /setup is React-only (core.py keeps POST only).
+    # Answer with the "frontend not built" page instead of a dead redirect.
+    react_ready = is_react_frontend_available()
+
     if find_user_by_username() is None:
-        return redirect("/setup")
+        return redirect("/setup") if react_ready else serve_react_app()
 
     if session.get("logged_in"):
         if is_session_valid():
-            return redirect("/dashboard")
+            return redirect("/dashboard") if react_ready else serve_react_app()
 
         revoke_user_tokens()
         session.clear()
 
     if "user" in session:
-        return redirect("/broker")
+        return redirect("/broker") if react_ready else serve_react_app()
 
-    return redirect("/login")
+    return redirect("/login") if react_ready else serve_react_app()
 
 
 @auth_bp.route("/login/totp", methods=["POST"])

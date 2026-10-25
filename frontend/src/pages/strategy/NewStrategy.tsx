@@ -71,7 +71,7 @@ export default function NewStrategy() {
     e.preventDefault()
 
     if (!validateForm()) {
-      showToast.error('Please fix the form errors', 'strategy')
+      showToast.error('Please fix the form errors')
       return
     }
 
@@ -90,14 +90,14 @@ export default function NewStrategy() {
       })
 
       if (response.status === 'success') {
-        showToast.success('Strategy created successfully', 'strategy')
+        showToast.success('Strategy created successfully')
         navigate(`/strategy/${response.data?.strategy_id}`)
       } else {
-        showToast.error(response.message || 'Failed to create strategy', 'strategy')
+        showToast.error(response.message || 'Failed to create strategy')
       }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to create strategy'
-      showToast.error(errorMessage, 'strategy')
+      showToast.error(errorMessage)
     } finally {
       setLoading(false)
     }

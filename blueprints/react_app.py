@@ -7,7 +7,7 @@ import mimetypes
 import os
 from pathlib import Path
 
-from flask import Blueprint, abort, request, send_file, send_from_directory
+from flask import Blueprint, abort, make_response, request, send_file, send_from_directory
 
 react_bp = Blueprint("react", __name__)
 
@@ -62,23 +62,34 @@ def is_react_frontend_available():
 def serve_react_app():
     """Serve the React app's index.html."""
     if not is_react_frontend_available():
-        return (
-            """
+        # A real Response, NEVER a bare (body, status) tuple. Callers pair this
+        # with their own status -- app.py's 404 handler does
+        # ``return serve_react_app(), 404`` -- and pairing a tuple with a status
+        # nests into ``((html, 503), 404)``. Flask then rejects the inner tuple
+        # with "The view function did not return a valid response ... but it was
+        # a tuple", and because that TypeError is raised FROM an error handler
+        # it escalates to the 500 handler, which redirects to /error, which is
+        # this same page: an endless redirect loop instead of a clear message.
+        html = """
         <html>
-        <head><title>OpenAlgo - Frontend Not Available</title></head>
+        <head><meta charset="utf-8"><title>OpenAlgo - Frontend Not Available</title></head>
         <body style="font-family: system-ui; padding: 40px; max-width: 600px; margin: 0 auto;">
             <h1>Frontend Not Built</h1>
-            <p>The React frontend is not available. To build it:</p>
+            <p>The React frontend is not available, so the web UI cannot be shown.
+            This download or checkout is missing the pre-built files in
+            <code>frontend/dist/</code>.</p>
+            <p>To build it:</p>
             <pre style="background: #f4f4f4; padding: 16px; border-radius: 8px;">
 cd frontend
 npm install
 npm run build</pre>
-            <p>Or use the pre-built version from the repository.</p>
+            <p>The API itself (<code>/api/v1/...</code>) is unaffected and keeps working.</p>
         </body>
         </html>
-        """,
-            503,
-        )
+        """
+        response = make_response(html, 503)
+        response.headers["Content-Type"] = "text/html; charset=utf-8"
+        return response
 
     index_path = FRONTEND_DIST / "index.html"
     response = send_file(index_path, mimetype="text/html")

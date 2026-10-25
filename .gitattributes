@@ -1,0 +1,16 @@
+# Built frontend assets are shipped VERBATIM.
+#
+# frontend/dist/ is committed (see .gitignore) so every branch/tag zip has a
+# working UI without npm. Those files are served with `Cache-Control: immutable`
+# and their names are content-hashed, so the bytes a user downloads must be the
+# bytes that were built -- a hash in the filename that does not match the body
+# breaks long-lived caches. With core.autocrlf=true (as on Windows) git rewrites
+# every line ending on checkout, which makes the downloaded copy differ from the
+# built one. These are build outputs, never hand-edited, so no conversion.
+frontend/dist/** -text
+
+# Binaries that appear inside the build.
+*.png binary
+*.ico binary
+*.woff binary
+*.woff2 binary

@@ -76,10 +76,15 @@ dist/
 build/
 .next/
 out/
+# frontend/dist IS committed: every branch/tag source archive must ship a
+# working UI out of the box. Negate the blanket dist/ rule above -- git applies
+# the LAST matching pattern, so this re-includes the frontend build.
+!frontend/dist/
 
 # Frontend specific
-# frontend/dist/ is built by CI/CD pipeline
-frontend/dist/
+# frontend/dist/ is built by CI/CD pipeline AND committed to the tree. It is
+# deliberately NOT ignored here (see the negation above); a zip download has to
+# contain a built UI without the user running npm first.
 frontend/.cache/
 *.local
 

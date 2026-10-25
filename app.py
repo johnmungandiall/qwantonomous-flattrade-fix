@@ -614,18 +614,68 @@ def create_app():
         if path.startswith(("/assets/", "/static/")) or "." in path.rsplit("/", 1)[-1]:
             return "Not Found", 404
 
+        # Without a build on disk react_bp was never registered (see
+        # is_react_frontend_available above), so the SPA shell does not exist and
+        # "Frontend Not Built" IS the right answer -- return it as-is so its 503
+        # survives. Wrapping it (``serve_react_app(), 404``) would nest a
+        # Response/tuple pair and raise TypeError inside every response builder.
+        if not is_react_frontend_available():
+            return serve_react_app()
+
         return serve_react_app(), 404
 
     @app.errorhandler(500)
     def internal_server_error(e):
         """Custom handler for 500 Internal Server Error"""
-        from flask import redirect
+        from flask import jsonify, make_response, redirect, request
 
         # Log the error
         logger.error(f"Server Error: {e}")
 
-        # Redirect to React error page
-        return redirect("/error")
+        # Redirecting to the React error page is only safe when a React app
+        # exists to render it. With frontend/dist missing, /error has no route:
+        # it 404s, the 404 handler fails, and the resulting 500 redirects to
+        # /error again -- an endless loop ending in ERR_TOO_MANY_REDIRECTS.
+        # Redirecting to /error while already ON /error loops the same way, so
+        # both cases answer in place with a real fallback Response instead.
+        if is_react_frontend_available() and request.path != "/error":
+            return redirect("/error")
+
+        if request.path.startswith("/api/"):
+            return make_response(
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Internal server error. Check the server logs for details.",
+                    }
+                ),
+                500,
+            )
+
+        html = """<!doctype html>
+<html><head><meta charset="utf-8"><title>OpenAlgo - Internal Server Error</title></head>
+<body style="font-family: system-ui; padding: 40px; max-width: 640px; margin: 0 auto;">
+<h1>Internal Server Error</h1>
+<p>The server hit an unexpected error and could not complete the request.</p>
+<p>Details are recorded in <code>log/errors.jsonl</code>. Reload the page to try again.</p>
+</body></html>"""
+        return make_response(html, 500)
+
+    @app.errorhandler(405)
+    def method_not_allowed_error(e):
+        """Answer a wrong-method request in the degraded (no build) state."""
+        from flask import request
+
+        # GET /setup is React-only (core_bp deliberately keeps POST), so with no
+        # build on disk nothing serves that URL and Flask answers a bare
+        # "405 Method Not Allowed" page that tells the user nothing. Every other
+        # SPA path already explains itself; make this one consistent. The API
+        # namespaces keep Flask's default so a client still gets a real 405, and
+        # with a build present this handler is transparent on every path.
+        api_namespaces = ("/api/", "/flow/api/", "/flow/webhook/")
+        if not is_react_frontend_available() and not request.path.startswith(api_namespaces):
+            return serve_react_app()
+        return e.get_response()
 
     @app.errorhandler(429)
     def rate_limit_exceeded(e):

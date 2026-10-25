@@ -126,7 +126,11 @@ def check_env_version_compatibility() -> bool:
     # Read version from .env file
     env_version = None
     try:
-        with open(env_path) as f:
+        # Explicit UTF-8: the platform default is cp1252 on Windows, and a
+        # single non-UTF-8 byte in a hand-edited .env made this raise
+        # "'charmap' codec can't decode byte 0x9d" on every startup. Only an
+        # ASCII key name is read here, so replacing undecodable bytes is safe.
+        with open(env_path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("ENV_CONFIG_VERSION"):
@@ -139,7 +143,7 @@ def check_env_version_compatibility() -> bool:
     # Read version from .sample.env file
     sample_version = None
     try:
-        with open(sample_env_path) as f:
+        with open(sample_env_path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("ENV_CONFIG_VERSION"):
