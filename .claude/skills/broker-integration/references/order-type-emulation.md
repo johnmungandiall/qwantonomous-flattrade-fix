@@ -91,37 +91,39 @@ fill:
 - **SELL stop** — limit strictly **below** the trigger
 - **BUY stop** — limit strictly **above** the trigger
 
-so the order stays marketable once it triggers. The rules that make it correct:
+so the order stays marketable once it triggers. **Do not re-implement this** — it
+is one shared helper, `utils/mpp_slab.py#slm_protected_price`, used by every
+mapping in the tree. The rules it enforces:
 
-1. **Offset by the MPP percentage**, from the shared slab table, based on the
-   trigger price and instrument type.
-2. **Snap to the instrument tick** in the beyond-trigger direction — SELL
-   floors, BUY ceils. Rounding the ordinary way can land the limit back on the
-   trigger and re-trip the rejection.
-3. **Force at least one full tick past the trigger.** Take the more aggressive
-   of `trigger * (1 ± pct)` and `trigger ± tick_size`, so a tiny percentage on
-   a low-priced instrument still clears the trigger.
+1. **Basis is the TRIGGER**, never the LTP — the two are independent numbers, and
+   pricing off the LTP is what produced `prc=102` against `trgprc=110`.
+2. **Snap to the instrument tick** in the beyond-trigger direction — SELL floors,
+   BUY ceils. Rounding the ordinary way can land the limit back on the trigger
+   and re-trip the rejection.
+3. **Force at least one full tick past the trigger**, so a tiny percentage on a
+   low-priced instrument still clears it.
 4. **Read `tick_size` from `SymToken`** via `get_symbol_info(symbol, exchange)`
-   — the master contract is the source of truth.
-5. **Fail closed if the tick size is unresolvable.** Master-contract rows can
-   coerce to `NaN`; validate `math.isfinite(tick) and tick > 0` and raise rather
-   than emitting a 2-decimal guess the broker will reject.
+   — the master contract is the source of truth. No quote is needed.
+5. **Pass `require_tick_size=True`** if the broker rejects an off-tick price —
+   the helper then fails closed instead of emitting a 2-decimal guess.
 6. **Guard against a non-positive limit** on cheap options — a SELL stop on a
-   0.05 option can compute its way to zero.
+   0.05 option can compute its way to zero (the helper raises).
 
 ```python
-if action.upper() == "SELL":
-    raw = min(trigger_price * (1 - pct), trigger_price - tick_size)
-    limit = _snap_to_tick(raw, tick_size, "floor")
-    if limit <= 0:
-        raise ValueError(...)          # too low to protect
-else:
-    raw = max(trigger_price * (1 + pct), trigger_price + tick_size)
-    limit = _snap_to_tick(raw, tick_size, "ceil")
+from utils.mpp_slab import slm_protected_price
+
+limit = slm_protected_price(
+    action=action,                  # BUY -> above the trigger, SELL -> below
+    trigger=trigger_price,
+    tick_size=getattr(get_symbol_info(symbol, exchange), "tick_size", None),
+    custom_percentage=custom_percentage_from(data),
+    symbol=symbol,
+)
 ```
 
-`_snap_to_tick` is currently duplicated in `broker/dhan/` and
-`broker/iiflcapital/` rather than shared — copy from either.
+`_snap_to_tick` used to be duplicated in `broker/dhan/` and
+`broker/iiflcapital/`; both now delegate to the shared helper, which also carries
+`tick_decimals` / `snap_to_tick` / `snap_beyond_trigger`.
 
 ## How brokers actually spell SL-M
 

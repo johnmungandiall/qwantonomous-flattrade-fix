@@ -4,7 +4,7 @@
 from broker.zebu.api.data import BrokerData
 from database.token_db import get_br_symbol
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price, get_instrument_type_from_symbol
+from utils.mpp_slab import calculate_protected_price, custom_percentage_from, get_instrument_type_from_symbol
 
 logger = get_logger(__name__)
 
@@ -68,6 +68,7 @@ def transform_data(data, token, auth_token=None):
                         symbol=data["symbol"],
                         instrument_type=instrument_type,
                         tick_size=tick_size,
+                        custom_percentage=custom_percentage_from(data),
                     )
                     price = str(protected_price)
 

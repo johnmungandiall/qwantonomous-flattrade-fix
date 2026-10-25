@@ -1,33 +1,24 @@
 import math
-from decimal import Decimal
 from typing import Any
 
 from database.token_db import get_symbol_info
 from utils.logging import get_logger
-from utils.mpp_slab import get_instrument_type_from_symbol, get_mpp_percentage
+from utils.mpp_slab import (
+    custom_percentage_from,
+    get_instrument_type_from_symbol,
+    slm_protected_price,
+)
 
 logger = get_logger(__name__)
 
 
-def _tick_decimals(tick: float) -> int:
-    """Number of decimal places implied by a tick size (0.05 -> 2, 0.0025 -> 4)."""
-    return max(0, -Decimal(str(tick)).as_tuple().exponent)
-
-
-def _snap_to_tick(value: float, tick: float, direction: str) -> float:
-    """Snap ``value`` to a multiple of ``tick``.
-
-    direction ``"floor"`` rounds down, ``"ceil"`` rounds up — used to keep the
-    protective limit strictly on the required side of the trigger after
-    snapping (nearest-tick rounding could otherwise land it back on the
-    trigger).
-    """
-    ratio = round(value / tick, 6)  # tame float noise before the floor/ceil
-    k = math.floor(ratio) if direction == "floor" else math.ceil(ratio)
-    return round(k * tick, _tick_decimals(tick))
-
-
-def _slm_protected_price(symbol: str, exchange: str, action: str, trigger_price: float) -> float:
+def _slm_protected_price(
+    symbol: str,
+    exchange: str,
+    action: str,
+    trigger_price: float,
+    custom_percentage: float = None,
+) -> float:
     """
     Derive a protective stop-limit price for an SL-M order from its trigger price.
 
@@ -55,35 +46,26 @@ def _slm_protected_price(symbol: str, exchange: str, action: str, trigger_price:
     """
     instrument_type = get_instrument_type_from_symbol(symbol)
 
+    # Tick size from the instrument master; unresolvable fails closed rather than
+    # guessing 2 decimals. The beyond-trigger geometry (BUY above, SELL below, at
+    # least one tick out, never back onto the trigger) is the shared helper.
     symbol_info = get_symbol_info(symbol, exchange)
     try:
         tick_size = float(getattr(symbol_info, "tick_size", None)) if symbol_info else 0.0
     except (TypeError, ValueError):
         tick_size = 0.0
     if not math.isfinite(tick_size) or tick_size <= 0:
-        raise ValueError(
-            f"Cannot resolve tick size from DB for {symbol}/{exchange}; required to "
-            f"build a valid SL-M protective limit price"
-        )
+        tick_size = None
 
-    pct = (get_mpp_percentage(trigger_price, instrument_type) or 0) / 100.0
-
-    if action.upper() == "SELL":
-        # Strictly BELOW trigger, >= one tick away, tick-aligned (floor), and
-        # strictly positive.
-        raw = min(trigger_price * (1 - pct), trigger_price - tick_size)
-        limit = _snap_to_tick(raw, tick_size, "floor")
-        if limit <= 0:
-            raise ValueError(
-                f"SL-M SELL trigger {trigger_price} for {symbol}/{exchange} is too low "
-                f"to derive a positive protective limit at tick {tick_size}"
-            )
-    else:
-        # Strictly ABOVE trigger, >= one tick away, tick-aligned (ceil).
-        raw = max(trigger_price * (1 + pct), trigger_price + tick_size)
-        limit = _snap_to_tick(raw, tick_size, "ceil")
-
-    return limit
+    return slm_protected_price(
+        action=action,
+        trigger=trigger_price,
+        tick_size=tick_size,
+        custom_percentage=custom_percentage,
+        symbol=symbol,
+        instrument_type=instrument_type,
+        require_tick_size=True,
+    )
 
 
 def map_exchange(exchange: str) -> str:
@@ -196,6 +178,7 @@ def transform_data(data: dict, token: str) -> dict:
                 data.get("exchange", ""),
                 data.get("action", ""),
                 trigger_price,
+                custom_percentage_from(data),
             )
             transformed["orderType"] = "SL"
             transformed["price"] = protected_price

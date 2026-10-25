@@ -12,7 +12,7 @@ from broker.zerodha.mapping.gtt_data import (
 from database.token_db_enhanced import get_symbol_info
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price, get_instrument_type_from_symbol
+from utils.mpp_slab import calculate_protected_price, custom_percentage_from, get_instrument_type_from_symbol
 
 logger = get_logger(__name__)
 
@@ -90,6 +90,7 @@ def _apply_mpp_if_market(data, last_price):
                 symbol=symbol,
                 instrument_type=instrument_type,
                 tick_size=tick_size,
+                custom_percentage=custom_percentage_from(data),
             )
         if tg_trigger > 0:
             data["target"] = calculate_protected_price(
@@ -98,6 +99,7 @@ def _apply_mpp_if_market(data, last_price):
                 symbol=symbol,
                 instrument_type=instrument_type,
                 tick_size=tick_size,
+                custom_percentage=custom_percentage_from(data),
             )
     else:
         if last_price and last_price > 0:
@@ -107,6 +109,7 @@ def _apply_mpp_if_market(data, last_price):
                 symbol=symbol,
                 instrument_type=instrument_type,
                 tick_size=tick_size,
+                custom_percentage=custom_percentage_from(data),
             )
         else:
             logger.warning(

@@ -3,9 +3,24 @@
 
 from database.token_db import get_br_symbol, get_symbol_info
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price, get_instrument_type_from_symbol
+from utils.mpp_slab import (
+    calculate_protected_price,
+    custom_percentage_from,
+    get_instrument_type_from_symbol,
+    slm_protected_price,
+)
 
 logger = get_logger(__name__)
+
+
+def _tick_size_from_master(symbol, exchange):
+    """Tick size from the instrument master, for when no quote is available."""
+    try:
+        info = get_symbol_info(symbol, exchange)
+        return getattr(info, "tick_size", None)
+    except Exception as error:
+        logger.error(f"MPP: tick size lookup failed for {symbol}@{exchange}: {error}")
+        return None
 
 
 def transform_data(data, token, auth_token=None):
@@ -66,7 +81,31 @@ def transform_data(data, token, auth_token=None):
                 # Get LTP for price calculation
                 ltp = float(quote_data.get("ltp", 0))
 
-                if ltp > 0:
+                if original_type == "SL-M":
+                    # Noren keeps a stop-limit on the PROTECTIVE side of its own
+                    # trigger (prc > trgprc for BUY, prc < trgprc for SELL), so an
+                    # SL-M prices off the TRIGGER - never the LTP. Pricing off the
+                    # LTP sent a BUY triggered at 110 out at 102 (below its own
+                    # trigger) and the OMS rejected it. The rounding direction then
+                    # keeps the limit beyond the trigger (BUY ceils, SELL floors).
+                    protected_price = slm_protected_price(
+                        action=action,
+                        trigger=float(data.get("trigger_price") or 0),
+                        tick_size=tick_size
+                        or _tick_size_from_master(data["symbol"], data["exchange"]),
+                        custom_percentage=custom_percentage_from(data),
+                        symbol=data["symbol"],
+                        instrument_type=instrument_type,
+                    )
+                    price = str(protected_price)
+                    order_type = "SL-LMT"
+
+                    logger.info(
+                        f"MPP SL-M Conversion Complete: Symbol={data['symbol']}, "
+                        f"Trigger={data.get('trigger_price')}, "
+                        f"OrderType={original_type}->{order_type}, FinalPrice={protected_price}"
+                    )
+                elif ltp > 0:
                     # Calculate protected price using centralized MPP slab with tick size rounding
                     protected_price = calculate_protected_price(
                         price=ltp,
@@ -74,15 +113,11 @@ def transform_data(data, token, auth_token=None):
                         symbol=data["symbol"],
                         instrument_type=instrument_type,
                         tick_size=tick_size,
+                        custom_percentage=custom_percentage_from(data),
                     )
                     price = str(protected_price)
-
-                    if original_type == "MARKET":
-                        # Convert MARKET to LIMIT
-                        order_type = "LMT"
-                    else:
-                        # Convert SL-M to SL-LMT (keep trigger price)
-                        order_type = "SL-LMT"
+                    # Only MARKET reaches this path.
+                    order_type = "LMT"
 
                     logger.info(
                         f"MPP Conversion Complete: Symbol={data['symbol']}, "
@@ -124,18 +159,21 @@ def transform_data(data, token, auth_token=None):
                 # means no tick size from the API, so read it from SymToken.
                 price = str(trigger)
                 try:
-                    info = get_symbol_info(data["symbol"], data["exchange"])
-                    tick_size = getattr(info, "tick_size", None)
-                    if tick_size:
-                        price = str(
-                            calculate_protected_price(
-                                price=trigger,
-                                action=action,
-                                symbol=data["symbol"],
-                                instrument_type=get_instrument_type_from_symbol(data["symbol"]),
-                                tick_size=tick_size,
-                            )
+                    # Off the TRIGGER, in the direction that keeps the limit beyond
+                    # it (BUY ceils, SELL floors). With no tick size from a quote,
+                    # read it from the instrument master.
+                    price = str(
+                        slm_protected_price(
+                            action=action,
+                            trigger=trigger,
+                            tick_size=_tick_size_from_master(
+                                data["symbol"], data["exchange"]
+                            ),
+                            custom_percentage=custom_percentage_from(data),
+                            symbol=data["symbol"],
+                            instrument_type=get_instrument_type_from_symbol(data["symbol"]),
                         )
+                    )
                 except Exception as e:
                     logger.error(
                         f"MPP Fallback Error: could not protect off the trigger for "

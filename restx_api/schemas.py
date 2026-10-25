@@ -3,6 +3,27 @@ from marshmallow import EXCLUDE, Schema, ValidationError, fields, post_load, pre
 from utils.constants import CRYPTO_EXCHANGES, VALID_EXCHANGES
 
 
+def _validate_mpp_percentage(value):
+    """Reject an out-of-range caller-supplied Market Price Protection %.
+
+    ``mpp_percentage`` lets a caller choose their own protection buffer instead of
+    the built-in slab. The bounds are enforced here so a bad value comes back as a
+    clean 400 instead of a broker-side failure: a SELL limit is priced at
+    ``price * (1 - pct/100)``, so 100 % or more collapses the limit to zero.
+    ``None`` (the default) keeps the slab deciding.
+    """
+    if value is None:
+        return
+    if value <= 0:
+        raise ValidationError(
+            "mpp_percentage must be greater than 0 (omit it to use the built-in slab)."
+        )
+    if value >= 100:
+        raise ValidationError(
+            "mpp_percentage must be below 100 - a limit priced a full 100 % away is zero."
+        )
+
+
 def _coerce_quantity_to_int(data):
     """Convert quantity from float to int for non-crypto exchanges.
 
@@ -46,6 +67,9 @@ class OrderSchema(Schema):
     underlying_ltp = fields.Float(
         missing=None, allow_none=True
     )  # Optional: passed from options order for execution reference
+    mpp_percentage = fields.Float(
+        missing=None, allow_none=True, validate=_validate_mpp_percentage
+    )  # Optional: caller-chosen Market Price Protection % (overrides the slab)
 
     @post_load
     def coerce_quantity(self, data, **kwargs):
@@ -78,6 +102,9 @@ class SmartOrderSchema(Schema):
         missing=0,
         validate=validate.Range(min=0, error="Disclosed quantity must be a non-negative integer."),
     )
+    mpp_percentage = fields.Float(
+        missing=None, allow_none=True, validate=_validate_mpp_percentage
+    )  # Optional: caller-chosen Market Price Protection % (overrides the slab)
 
     @post_load
     def coerce_quantity(self, data, **kwargs):
@@ -109,6 +136,9 @@ class ModifyOrderSchema(Schema):
         required=True,
         validate=validate.Range(min=0, error="Trigger price must be a non-negative number."),
     )
+    mpp_percentage = fields.Float(
+        missing=None, allow_none=True, validate=_validate_mpp_percentage
+    )  # Optional: caller-chosen Market Price Protection % (overrides the slab)
 
     @post_load
     def coerce_quantity(self, data, **kwargs):
@@ -153,6 +183,9 @@ class BasketOrderItemSchema(Schema):
         missing=0,
         validate=validate.Range(min=0, error="Disclosed quantity must be a non-negative integer."),
     )
+    mpp_percentage = fields.Float(
+        missing=None, allow_none=True, validate=_validate_mpp_percentage
+    )  # Optional: caller-chosen Market Price Protection % (overrides the slab)
 
     @post_load
     def coerce_quantity(self, data, **kwargs):
@@ -196,6 +229,9 @@ class SplitOrderSchema(Schema):
         missing=0,
         validate=validate.Range(min=0, error="Disclosed quantity must be a non-negative integer."),
     )
+    mpp_percentage = fields.Float(
+        missing=None, allow_none=True, validate=_validate_mpp_percentage
+    )  # Optional: caller-chosen Market Price Protection % (overrides the slab)
 
     @post_load
     def coerce_quantity(self, data, **kwargs):
@@ -245,6 +281,9 @@ class OptionsOrderSchema(Schema):
         missing=0,
         validate=validate.Range(min=0, error="Disclosed quantity must be a non-negative integer."),
     )
+    mpp_percentage = fields.Float(
+        missing=None, allow_none=True, validate=_validate_mpp_percentage
+    )  # Optional: caller-chosen Market Price Protection % (overrides the slab)
 
 
 class OptionsMultiOrderLegSchema(Schema):
@@ -283,6 +322,9 @@ class OptionsMultiOrderLegSchema(Schema):
         missing=0,
         validate=validate.Range(min=0, error="Disclosed quantity must be a non-negative integer."),
     )
+    mpp_percentage = fields.Float(
+        missing=None, allow_none=True, validate=_validate_mpp_percentage
+    )  # Optional: caller-chosen Market Price Protection % (overrides the slab)
 
 
 class OptionsMultiOrderSchema(Schema):
@@ -480,6 +522,9 @@ class PlaceGTTOrderSchema(Schema):
     stoploss = fields.Float(missing=None, allow_none=True)
     target = fields.Float(missing=None, allow_none=True)
     expires_at = fields.Str(missing=None, allow_none=True)
+    mpp_percentage = fields.Float(
+        missing=None, allow_none=True, validate=_validate_mpp_percentage
+    )  # Optional: caller-chosen Market Price Protection % (overrides the slab)
 
     @pre_load
     def coerce_empty_to_none(self, data, **kwargs):
@@ -538,6 +583,9 @@ class ModifyGTTOrderSchema(Schema):
     )
     stoploss = fields.Float(missing=None, allow_none=True)
     target = fields.Float(missing=None, allow_none=True)
+    mpp_percentage = fields.Float(
+        missing=None, allow_none=True, validate=_validate_mpp_percentage
+    )  # Optional: caller-chosen Market Price Protection % (overrides the slab)
 
     @pre_load
     def coerce_empty_to_none(self, data, **kwargs):

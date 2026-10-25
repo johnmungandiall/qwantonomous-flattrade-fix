@@ -6,6 +6,7 @@
 # with a price buffer based on configurable protection percentages.
 
 import math
+from decimal import Decimal
 from typing import Optional
 
 from utils.logging import get_logger
@@ -32,6 +33,71 @@ OPT_MPP_SLABS = [
 
 # Instrument types that use Options slabs
 OPTIONS_INSTRUMENT_TYPES = ["CE", "PE"]
+
+# Hard ceiling for a CALLER-SUPPLIED protection percentage (`mpp_percentage` on
+# the order APIs). A SELL limit is priced at `price * (1 - pct/100)`, so at
+# 100 % the limit is zero and beyond it the limit turns negative - no exchange
+# accepts either. The slab table's own maximum is 5 %, so every value the slabs
+# produce sits far inside this bound; it exists only to keep a typed figure
+# (e.g. 100 or 1000) from building an unsendable order.
+MPP_PERCENTAGE_LIMIT = 100.0
+
+
+def normalise_custom_percentage(percentage):
+    """Validate a caller-supplied MPP percentage.
+
+    Args:
+        percentage: Raw value from the request (`mpp_percentage`). None, an
+            empty string or a blank string all mean "not supplied" and return
+            None, so the slab table keeps deciding.
+
+    Returns:
+        Optional[float]: The percentage to use, or None to fall back to the slab.
+
+    Raises:
+        ValueError: The value is not a finite number in (0, MPP_PERCENTAGE_LIMIT).
+    """
+    if percentage is None:
+        return None
+    if isinstance(percentage, str):
+        percentage = percentage.strip()
+        if percentage == "":
+            return None
+    try:
+        value = float(percentage)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Invalid mpp_percentage {percentage!r}: must be a number"
+        ) from None
+    if not math.isfinite(value):
+        raise ValueError(
+            f"Invalid mpp_percentage {percentage!r}: must be a finite number"
+        )
+    if value <= 0:
+        raise ValueError(
+            f"Invalid mpp_percentage {value}: must be greater than 0 (omit it "
+            f"to use the built-in slab)"
+        )
+    if value >= MPP_PERCENTAGE_LIMIT:
+        raise ValueError(
+            f"Invalid mpp_percentage {value}: must be below "
+            f"{MPP_PERCENTAGE_LIMIT:g} % - a limit priced a full {MPP_PERCENTAGE_LIMIT:g} "
+            f"% away collapses to zero"
+        )
+    return value
+
+
+def custom_percentage_from(data):
+    """Read the caller's `mpp_percentage` out of an OpenAlgo order dict.
+
+    Every broker mapper already receives the validated order dict, so this is
+    the one place that decides what an `mpp_percentage` key means. A missing or
+    blank value returns None and the slab table keeps deciding, which is exactly
+    the behaviour every existing install already has.
+    """
+    if not isinstance(data, dict):
+        return None
+    return normalise_custom_percentage(data.get("mpp_percentage"))
 
 
 def get_instrument_type_from_symbol(symbol: str) -> str:
@@ -71,13 +137,17 @@ def get_mpp_slabs(instrument_type: str) -> list:
         return EQ_FUT_MPP_SLABS
 
 
-def get_mpp_percentage(price: float, instrument_type: str = "EQ") -> float:
+def get_mpp_percentage(
+    price: float, instrument_type: str = "EQ", custom_percentage=None
+) -> float:
     """
     Get the Market Price Protection percentage for a given price and instrument type.
 
     Args:
         price: The current market price (LTP)
         instrument_type: 'EQ', 'FUT', 'CE', or 'PE'
+        custom_percentage: Caller-supplied percentage. When given (and valid) it
+            replaces the slab lookup entirely, so the caller decides the buffer.
 
     Returns:
         float: The protection percentage to apply
@@ -86,7 +156,16 @@ def get_mpp_percentage(price: float, instrument_type: str = "EQ") -> float:
         >>> get_mpp_percentage(50, 'EQ')   # Returns 2.0 (for EQ/FUT price < 100)
         >>> get_mpp_percentage(50, 'CE')   # Returns 3.0 (for OPT price 10-100)
         >>> get_mpp_percentage(5, 'PE')    # Returns 5.0 (for OPT price < 10)
+        >>> get_mpp_percentage(50, 'EQ', custom_percentage=0.75)  # Returns 0.75
     """
+    custom = normalise_custom_percentage(custom_percentage)
+    if custom is not None:
+        logger.info(
+            f"MPP Percentage (caller-supplied): InstrumentType={instrument_type}, "
+            f"Price={price}, Protection={custom}%"
+        )
+        return custom
+
     slabs = get_mpp_slabs(instrument_type)
     slab_type = "OPT" if instrument_type in OPTIONS_INSTRUMENT_TYPES else "EQ/FUT"
 
@@ -180,10 +259,11 @@ def calculate_protected_price(
     elif instrument_type is None:
         instrument_type = "EQ"  # Default to EQ
 
-    # Get protection percentage
-    if custom_percentage is not None:
-        percentage = custom_percentage
-        logger.info(f"MPP: Using custom percentage: {percentage}%")
+    # Get protection percentage. A caller-supplied value wins over the slab.
+    custom = normalise_custom_percentage(custom_percentage)
+    if custom is not None:
+        percentage = custom
+        logger.info(f"MPP: Using caller-supplied percentage: {percentage}%")
     else:
         percentage = get_mpp_percentage(price, instrument_type)
 
@@ -199,10 +279,28 @@ def calculate_protected_price(
         protected_price = price * (1 - multiplier)
         adjustment_type = "-"
 
+    # A large caller-supplied percentage can drive the limit to zero or below
+    # (SELL: `price * (1 - pct/100)`). Refuse instead of handing the broker an
+    # unsendable price - the slab table can never reach this branch.
+    if protected_price <= 0:
+        raise ValueError(
+            f"mpp_percentage {percentage}% prices a {action.upper()} at "
+            f"{protected_price} for {symbol or instrument_type} (base {price}); "
+            f"no positive limit can be derived from this percentage"
+        )
+
     # Round to tick size. The direction matters: a marketable SELL must round
     # DOWN and a marketable BUY must round UP, so protection is never eaten by
     # half a tick of rounding toward the market.
     protected_price = round_to_tick_size(protected_price, tick_size, round_direction)
+
+    # Rounding down a sub-tick SELL limit can still land on zero.
+    if protected_price <= 0:
+        raise ValueError(
+            f"mpp_percentage {percentage}% leaves no valid tick for a "
+            f"{action.upper()} on {symbol or instrument_type} (base {price}, "
+            f"tick {tick_size})"
+        )
 
     logger.info(
         f"MPP Calculation: Symbol={symbol or 'N/A'}, InstrumentType={instrument_type}, "
@@ -214,8 +312,137 @@ def calculate_protected_price(
     return protected_price
 
 
+def tick_decimals(tick: float) -> int:
+    """Decimal places implied by a tick size (0.05 -> 2, 0.0025 -> 4)."""
+    return max(0, -Decimal(str(tick)).as_tuple().exponent)
+
+
+def snap_to_tick(value: float, tick: float, direction: str) -> float:
+    """Snap ``value`` to a multiple of ``tick``, in a FORCED direction.
+
+    ``direction`` is "floor" or "ceil". Nearest-tick rounding is deliberately
+    not offered here: on a trigger-anchored price it can put the limit back onto
+    the trigger, which is exactly the invalid state these callers are avoiding.
+    """
+    ratio = round(value / tick, 6)  # tame float noise before the floor/ceil
+    k = math.floor(ratio) if direction == "floor" else math.ceil(ratio)
+    return round(k * tick, tick_decimals(tick))
+
+
+def snap_beyond_trigger(limit, trigger, action, tick_size=None):
+    """Force a stop-limit strictly beyond its own trigger, by at least a tick.
+
+    A stop-limit lives on the PROTECTIVE side of its trigger — BUY above it,
+    SELL below it — and every Noren-family / SEBI-MPP broker rejects an order
+    that violates that relation with something like "Trigger price invalid".
+    A buffer thinner than one tick rounds straight back onto the trigger, so the
+    limit is stepped a full tick out and the strict side is then re-checked.
+
+    Raises:
+        ValueError: the required side cannot be reached with the given tick.
+    """
+    trigger = float(trigger)
+    action = (action or "").upper()
+    step = tick_size if (tick_size and tick_size > 0) else None
+
+    if action == "BUY":
+        if limit <= trigger and step:
+            limit = snap_to_tick(trigger + step, tick_size, "ceil")
+        if limit <= trigger:
+            raise ValueError(
+                f"cannot price an SL BUY limit above its trigger {trigger} "
+                f"(tick {tick_size})"
+            )
+    else:
+        if limit >= trigger and step:
+            limit = snap_to_tick(trigger - step, tick_size, "floor")
+        if limit >= trigger or limit <= 0:
+            raise ValueError(
+                f"cannot price an SL SELL limit below its trigger {trigger} "
+                f"(tick {tick_size})"
+            )
+    return limit
+
+
+def slm_protected_price(
+    action: str,
+    trigger: float,
+    tick_size: float = None,
+    custom_percentage=None,
+    symbol: str = None,
+    instrument_type: str = None,
+    require_tick_size: bool = False,
+) -> float:
+    """Protective LIMIT price for an SL-M order that must go out as a stop-limit.
+
+    A stop-limit keeps its LIMIT on the PROTECTIVE side of its own TRIGGER:
+    a BUY needs `prc > trgprc` (so the limit fills once the trigger is hit) and
+    a SELL needs `prc < trgprc`. Pricing such an order off the LTP instead
+    breaks that relation whenever price and trigger disagree - a BUY triggered
+    at 110 with an LTP of 100 went out at 102, i.e. BELOW its own trigger, and
+    the OMS rejected it.
+
+    So the reference price here is the TRIGGER, never the LTP, and the rounding
+    direction is chosen to keep the limit beyond it: BUY ceils, SELL floors.
+    This is the ONE implementation the whole codebase uses - do not re-derive it
+    per broker.
+
+    Args:
+        action: 'BUY' or 'SELL'.
+        trigger: The caller's trigger price (required, must be positive).
+        tick_size: Instrument tick size; falls back to 2 decimal places.
+        custom_percentage: Caller-supplied MPP % (None -> slab table).
+        symbol / instrument_type: Used for the slab lookup only.
+        require_tick_size: Fail closed when no tick size is known instead of
+            falling back to 2 decimals. Set by brokers that reject an off-tick
+            price (Dhan, Kotak, IIFL, 5Paisa).
+
+    Returns:
+        float: A tick-valid limit strictly beyond the trigger.
+
+    Raises:
+        ValueError: no trigger, an unknown action, a missing required tick
+            size, or no valid limit can be derived from the trigger.
+    """
+    trigger = float(trigger or 0)
+    if trigger <= 0:
+        raise ValueError(f"SL-M needs a positive trigger price (got {trigger})")
+
+    action = (action or "").upper()
+    if action not in ("BUY", "SELL"):
+        raise ValueError(f"SL-M needs a BUY/SELL action (got {action!r})")
+
+    has_tick = bool(tick_size and tick_size > 0)
+    if require_tick_size and not has_tick:
+        raise ValueError(
+            f"Cannot resolve a valid tick size for {symbol or 'the instrument'}; "
+            f"required to build an SL-M protective limit price"
+        )
+
+    if instrument_type is None and symbol:
+        instrument_type = get_instrument_type_from_symbol(symbol)
+
+    # BUY ceils above the trigger, SELL floors below it.
+    direction = "ceil" if action == "BUY" else "floor"
+    protected = calculate_protected_price(
+        price=trigger,
+        action=action,
+        symbol=symbol,
+        instrument_type=instrument_type,
+        tick_size=tick_size,
+        custom_percentage=custom_percentage,
+        round_direction=direction,
+    )
+
+    return snap_beyond_trigger(protected, trigger, action, tick_size)
+
+
 def get_mpp_info(
-    price: float, symbol: str = None, instrument_type: str = None, tick_size: float = None
+    price: float,
+    symbol: str = None,
+    instrument_type: str = None,
+    tick_size: float = None,
+    custom_percentage=None,
 ) -> dict:
     """
     Get detailed MPP information for a given price.
@@ -234,7 +461,8 @@ def get_mpp_info(
     elif instrument_type is None:
         instrument_type = "EQ"
 
-    percentage = get_mpp_percentage(price, instrument_type)
+    custom = normalise_custom_percentage(custom_percentage)
+    percentage = get_mpp_percentage(price, instrument_type, custom_percentage=custom)
     slab_type = "OPT" if instrument_type in OPTIONS_INSTRUMENT_TYPES else "EQ/FUT"
 
     return {
@@ -243,9 +471,14 @@ def get_mpp_info(
         "instrument_type": instrument_type,
         "slab_type": slab_type,
         "percentage": percentage,
+        "custom_percentage": custom,
         "tick_size": tick_size,
-        "buy_price": calculate_protected_price(price, "BUY", symbol, instrument_type, tick_size),
-        "sell_price": calculate_protected_price(price, "SELL", symbol, instrument_type, tick_size),
+        "buy_price": calculate_protected_price(
+            price, "BUY", symbol, instrument_type, tick_size, custom
+        ),
+        "sell_price": calculate_protected_price(
+            price, "SELL", symbol, instrument_type, tick_size, custom
+        ),
     }
 
 

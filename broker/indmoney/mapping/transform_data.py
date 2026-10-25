@@ -7,12 +7,16 @@ from broker.indmoney.api.data import BrokerData
 from database.auth_db import get_auth_token
 from database.token_db import get_symbol_info
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price, get_instrument_type_from_symbol
+from utils.mpp_slab import (
+    custom_percentage_from,
+    get_instrument_type_from_symbol,
+    slm_protected_price,
+)
 
 logger = get_logger(__name__)
 
 
-def _protective_limit(trigger, action, symbol, exchange):
+def _protective_limit(trigger, action, symbol, exchange, custom_percentage=None):
     """
     Derive a protective limit price from a stop trigger.
 
@@ -28,13 +32,16 @@ def _protective_limit(trigger, action, symbol, exchange):
         info = get_symbol_info(symbol, exchange)
         tick_size = getattr(info, "tick_size", None)
         if tick_size:
+            # Trigger-anchored geometry (BUY above, SELL below, at least one tick
+            # out) lives in the shared helper, not per broker.
             return float(
-                calculate_protected_price(
-                    price=trigger,
+                slm_protected_price(
                     action=action,
+                    trigger=trigger,
+                    tick_size=tick_size,
+                    custom_percentage=custom_percentage,
                     symbol=symbol,
                     instrument_type=get_instrument_type_from_symbol(symbol),
-                    tick_size=tick_size,
                 )
             )
         logger.warning(
@@ -166,11 +173,21 @@ def transform_data(data, token):
             limit_price = float(data.get("price") or 0)
             if limit_price <= 0:
                 limit_price = _protective_limit(
-                    trigger, action, data["symbol"], data["exchange"]
+                    trigger,
+                    action,
+                    data["symbol"],
+                    data["exchange"],
+                    custom_percentage_from(data),
                 )
         else:
             # SL-M: no market-on-trigger exists, so protect off the trigger.
-            limit_price = _protective_limit(trigger, action, data["symbol"], data["exchange"])
+            limit_price = _protective_limit(
+                trigger,
+                action,
+                data["symbol"],
+                data["exchange"],
+                custom_percentage_from(data),
+            )
 
         transformed = {
             "txn_type": action,

@@ -5,16 +5,26 @@ from database.token_db import get_br_symbol, get_symbol_info
 from utils.logging import get_logger
 from utils.mpp_slab import (
     calculate_protected_price,
+    custom_percentage_from,
     get_instrument_type_from_symbol,
     get_mpp_percentage,
+    slm_protected_price,
 )
 
 logger = get_logger(__name__)
 
 
-def _protected_price(price, action, symbol, exchange):
+def _protected_price(price, action, symbol, exchange, custom_percentage=None, slm=False):
     """
     Compute the MPP-protected limit price and slab percentage for a reference price.
+
+    A caller-supplied ``mpp_percentage`` replaces the slab, and Samco's
+    ``marketProtection`` field is sent that same value so the broker protects the
+    order by exactly what the API call asked for.
+
+    For a stop order the REFERENCE PRICE is the trigger, and the limit must sit
+    strictly beyond it (BUY above, SELL below) — that geometry is the shared
+    ``slm_protected_price`` helper, so pass ``slm=True``.
 
     Returns:
         tuple: (protected_price, mpp_percentage)
@@ -25,14 +35,29 @@ def _protected_price(price, action, symbol, exchange):
     if symbol_info and symbol_info.tick_size:
         tick_size = symbol_info.tick_size
 
-    mpp_percentage = get_mpp_percentage(price, instrument_type)
-    protected = calculate_protected_price(
-        price=price,
-        action=action,
-        symbol=symbol,
-        instrument_type=instrument_type,
-        tick_size=tick_size,
+    mpp_percentage = get_mpp_percentage(
+        price, instrument_type, custom_percentage=custom_percentage
     )
+    if slm:
+        # The helper re-derives the percentage from the slab; pass the resolved
+        # one so the price and the marketProtection field can never disagree.
+        protected = slm_protected_price(
+            action=action,
+            trigger=price,
+            tick_size=tick_size,
+            custom_percentage=mpp_percentage,
+            symbol=symbol,
+            instrument_type=instrument_type,
+        )
+    else:
+        protected = calculate_protected_price(
+            price=price,
+            action=action,
+            symbol=symbol,
+            instrument_type=instrument_type,
+            tick_size=tick_size,
+            custom_percentage=custom_percentage,
+        )
     return protected, mpp_percentage
 
 
@@ -91,7 +116,9 @@ def resolve_order_type(data, auth_token=None):
             if ltp <= 0:
                 raise ValueError(f"LTP is 0 for Symbol={symbol}. Cannot determine market price.")
 
-            protected, mpp_percentage = _protected_price(ltp, action, symbol, exchange)
+            protected, mpp_percentage = _protected_price(
+                ltp, action, symbol, exchange, custom_percentage_from(data)
+            )
             price = str(protected)
             order_type = "L"
             logger.info(
@@ -121,7 +148,9 @@ def resolve_order_type(data, auth_token=None):
                 f"SL-M order failed: trigger price is required for Symbol={symbol}"
             )
         try:
-            protected, mpp_percentage = _protected_price(trigger_price, action, symbol, exchange)
+            protected, mpp_percentage = _protected_price(
+                trigger_price, action, symbol, exchange, custom_percentage_from(data), slm=True
+            )
             price = str(protected)
             logger.info(
                 f"MPP Conversion: Symbol={symbol}, SL-M->SL, "

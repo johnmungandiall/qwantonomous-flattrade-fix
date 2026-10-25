@@ -20,7 +20,11 @@ import time
 from broker.hdfcsky.api.baseurl import get_client_id
 from database.token_db import get_symbol_info, get_token
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price
+from utils.mpp_slab import (
+    calculate_protected_price,
+    custom_percentage_from,
+    slm_protected_price,
+)
 
 logger = get_logger(__name__)
 
@@ -249,9 +253,25 @@ def _protect_market_order(data, auth_token, pricetype, action, fallback_price):
 
         info = get_symbol_info(symbol, exchange)
         tick_size = getattr(info, "tick_size", None)
-        protected = calculate_protected_price(
-            price=base_price, action=action, symbol=symbol, tick_size=tick_size
-        )
+        if pricetype == "SL-M":
+            # Trigger-anchored: the limit must sit strictly beyond the trigger,
+            # so the shared helper owns the geometry (BUY above, SELL below).
+            protected = slm_protected_price(
+                action=action,
+                trigger=base_price,
+                tick_size=tick_size,
+                custom_percentage=custom_percentage_from(data),
+                symbol=symbol,
+            )
+        else:
+            # MARKET is LTP-anchored and has no trigger relation to satisfy.
+            protected = calculate_protected_price(
+                price=base_price,
+                action=action,
+                symbol=symbol,
+                tick_size=tick_size,
+                custom_percentage=custom_percentage_from(data),
+            )
         logger.info(
             f"HDFC Sky MPP: {exchange}:{symbol} {pricetype}->{limit_type}, "
             f"base={base_price}, protected={protected}"

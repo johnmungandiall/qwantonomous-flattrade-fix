@@ -290,6 +290,9 @@ def resolve_and_place_leg(
                 "trigger_price": leg_data.get("trigger_price", 0.0),
                 "disclosed_quantity": leg_data.get("disclosed_quantity", 0),
                 "underlying_ltp": underlying_ltp,  # Pass LTP for execution reference
+                # Caller-chosen Market Price Protection % - every split leg of the
+                # leg inherits it. None = built-in slab.
+                "mpp_percentage": leg_data.get("mpp_percentage"),
             }
 
             # Process split orders sequentially with rate limiting
@@ -359,6 +362,8 @@ def resolve_and_place_leg(
             "trigger_price": leg_data.get("trigger_price", 0.0),
             "disclosed_quantity": leg_data.get("disclosed_quantity", 0),
             "underlying_ltp": underlying_ltp,  # Pass LTP for execution reference
+            # Caller-chosen Market Price Protection % (None = built-in slab).
+            "mpp_percentage": leg_data.get("mpp_percentage"),
         }
 
         # Step 3: Place the order

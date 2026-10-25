@@ -2,11 +2,14 @@
 # Mapping Kotak Neo API Parameters
 
 import math
-from decimal import Decimal
 
 from database.token_db import get_br_symbol, get_symbol_info
 from utils.logging import get_logger
-from utils.mpp_slab import get_instrument_type_from_symbol
+from utils.mpp_slab import (
+    custom_percentage_from,
+    get_instrument_type_from_symbol,
+    slm_protected_price,
+)
 
 logger = get_logger(__name__)
 
@@ -25,8 +28,14 @@ _KOTAK_OPT_ABSOLUTE_BELOW = 1.0
 _KOTAK_OPT_ABSOLUTE_OFFSET = 0.10
 
 
-def _mpp_offset(price, instrument_type):
-    """Kotak's protection offset (in rupees) for a price and instrument type."""
+def _mpp_offset(price, instrument_type, custom_percentage=None):
+    """Kotak's protection offset (in rupees) for a price and instrument type.
+
+    A caller-supplied ``mpp_percentage`` replaces Kotak's own grid, so the
+    percentage the order API call asked for is the one actually applied.
+    """
+    if custom_percentage is not None:
+        return price * custom_percentage / 100.0
     if instrument_type in ("CE", "PE"):
         if price < _KOTAK_OPT_ABSOLUTE_BELOW:
             return _KOTAK_OPT_ABSOLUTE_OFFSET
@@ -40,23 +49,7 @@ def _mpp_offset(price, instrument_type):
     return 0.0
 
 
-def _tick_decimals(tick):
-    """Number of decimal places implied by a tick size (0.05 -> 2, 0.0025 -> 4)."""
-    return max(0, -Decimal(str(tick)).as_tuple().exponent)
-
-
-def _snap_to_tick(value, tick, direction):
-    """Snap to a multiple of ``tick``, away from the trigger.
-
-    Nearest-tick rounding could land the limit back on the trigger, so the
-    direction is forced: "floor" for SELL, "ceil" for BUY.
-    """
-    ratio = round(value / tick, 6)  # tame float noise before the floor/ceil
-    k = math.floor(ratio) if direction == "floor" else math.ceil(ratio)
-    return round(k * tick, _tick_decimals(tick))
-
-
-def _slm_protected_price(symbol, exchange, action, trigger_price):
+def _slm_protected_price(symbol, exchange, action, trigger_price, custom_percentage=None):
     """
     Derive the protective limit price that turns an SL-M into a Kotak SL.
 
@@ -90,23 +83,23 @@ def _slm_protected_price(symbol, exchange, action, trigger_price):
             f"build a valid SL-M protective limit price"
         )
 
-    offset = _mpp_offset(trigger_price, instrument_type)
+    # Kotak's own grid (or the caller's percentage) decides the OFFSET, because
+    # only a rupee offset can express Kotak's absolute sub-rupee band below 1.
+    # Converting it back to a percentage lets the SHARED helper apply that offset
+    # with the beyond-trigger geometry every other broker uses, instead of a
+    # locally re-derived variant.
+    offset = _mpp_offset(trigger_price, instrument_type, custom_percentage)
+    effective_pct = (offset / trigger_price * 100.0) if trigger_price else 0.0
 
-    if action.upper() == "SELL":
-        # Strictly BELOW the trigger, at least one tick away, tick-aligned.
-        raw = min(trigger_price - offset, trigger_price - tick_size)
-        limit = _snap_to_tick(raw, tick_size, "floor")
-        if limit <= 0:
-            raise ValueError(
-                f"SL-M SELL trigger {trigger_price} for {symbol}/{exchange} is too low "
-                f"to derive a positive protective limit at tick {tick_size}"
-            )
-    else:
-        # Strictly ABOVE the trigger, at least one tick away, tick-aligned.
-        raw = max(trigger_price + offset, trigger_price + tick_size)
-        limit = _snap_to_tick(raw, tick_size, "ceil")
-
-    return limit
+    return slm_protected_price(
+        action=action,
+        trigger=trigger_price,
+        tick_size=tick_size,
+        custom_percentage=effective_pct,
+        symbol=symbol,
+        instrument_type=instrument_type,
+        require_tick_size=True,
+    )
 
 
 def _apply_slm_conversion(transformed, data):
@@ -119,7 +112,11 @@ def _apply_slm_conversion(transformed, data):
         raise ValueError("Trigger price is required and must be positive for SL-M orders")
 
     protected_price = _slm_protected_price(
-        data["symbol"], data["exchange"], data["action"], trigger_price
+        data["symbol"],
+        data["exchange"],
+        data["action"],
+        trigger_price,
+        custom_percentage_from(data),
     )
     transformed["pt"] = "SL"
     transformed["pr"] = _fmt_price(protected_price)

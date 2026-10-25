@@ -1,11 +1,26 @@
 # Mapping OpenAlgo API Request https://openalgo.in/docs
 # Mapping TradeSmart (Noren v2) order parameters
 
-from database.token_db import get_br_symbol
+from database.token_db import get_br_symbol, get_symbol_info
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price, get_instrument_type_from_symbol
+from utils.mpp_slab import (
+    calculate_protected_price,
+    custom_percentage_from,
+    get_instrument_type_from_symbol,
+    slm_protected_price,
+)
 
 logger = get_logger(__name__)
+
+
+def _tick_size_from_master(symbol, exchange):
+    """Tick size from the instrument master, for when no quote is available."""
+    try:
+        info = get_symbol_info(symbol, exchange)
+        return getattr(info, "tick_size", None)
+    except Exception as error:
+        logger.error(f"MPP: tick size lookup failed for {symbol}@{exchange}: {error}")
+        return None
 
 
 def transform_data(data, token=None, uid="", auth_token=None):
@@ -117,6 +132,26 @@ def _apply_mpp(data, action, pricetype, supplied_price, auth_token):
         else str(data.get("trigger_price", "0") or "0")
     )
 
+    # An SL-M keeps its limit on the PROTECTIVE side of its OWN trigger, so it
+    # prices off the TRIGGER - never the LTP - and needs no quote at all. One
+    # shared implementation (utils/mpp_slab.py#slm_protected_price), so every
+    # broker rounds and steps the same way.
+    if pricetype == "SL-M":
+        trigger = float(data.get("trigger_price", 0) or 0)
+        protected = slm_protected_price(
+            action=action,
+            trigger=trigger,
+            tick_size=_tick_size_from_master(data["symbol"], data["exchange"]),
+            custom_percentage=custom_percentage_from(data),
+            symbol=data["symbol"],
+            instrument_type=get_instrument_type_from_symbol(data["symbol"]),
+        )
+        logger.info(
+            f"MPP: {pricetype}->{target_type} {data['symbol']} "
+            f"trigger={trigger} protected={protected}"
+        )
+        return target_type, str(protected)
+
     if not auth_token:
         logger.warning(
             f"MPP: no auth token for {data['symbol']}; converting "
@@ -132,11 +167,9 @@ def _apply_mpp(data, action, pricetype, supplied_price, auth_token):
         tick_size = quote.get("tick_size")
         instrument_type = get_instrument_type_from_symbol(data["symbol"])
 
-        # MARKET prices off LTP; SL-M prices off the trigger (fall back to LTP)
-        if pricetype == "MARKET":
-            basis = ltp
-        else:
-            basis = float(data.get("trigger_price", 0) or 0) or ltp
+        # SL-M already returned above (trigger-anchored, no quote needed), so
+        # only MARKET reaches here and its basis is the LTP.
+        basis = ltp
 
         if basis and basis > 0:
             protected = calculate_protected_price(
@@ -145,6 +178,7 @@ def _apply_mpp(data, action, pricetype, supplied_price, auth_token):
                 symbol=data["symbol"],
                 instrument_type=instrument_type,
                 tick_size=tick_size,
+                custom_percentage=custom_percentage_from(data),
             )
             logger.info(
                 f"MPP: {pricetype}->{target_type} {data['symbol']} "

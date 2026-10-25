@@ -2,9 +2,13 @@
 # Mapping Flattrade GetBasketMargin API
 
 from broker.flattrade.mapping.transform_data import map_order_type, map_product_type
-from database.token_db import get_br_symbol
+from database.token_db import get_br_symbol, get_symbol_info
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price, get_instrument_type_from_symbol
+from utils.mpp_slab import (
+    calculate_protected_price,
+    get_instrument_type_from_symbol,
+    slm_protected_price,
+)
 
 logger = get_logger(__name__)
 
@@ -35,6 +39,32 @@ def _apply_mpp(position, auth_token):
         if original_type == "MARKET"
         else str(position.get("trigger_price", 0) or 0)
     )
+
+    # An SL-LMT must keep its limit on the PROTECTIVE side of its own trigger
+    # (BUY above it, SELL below it), so an SL-M leg is priced off the TRIGGER -
+    # never the LTP - and needs no quote at all. Same shared helper as the
+    # place-order path, so the margin estimate matches the order actually sent.
+    if original_type == "SL-M":
+        trigger = float(position.get("trigger_price", 0) or 0)
+        try:
+            info = get_symbol_info(position["symbol"], position["exchange"])
+            protected = slm_protected_price(
+                action=action,
+                trigger=trigger,
+                tick_size=getattr(info, "tick_size", None),
+                symbol=position["symbol"],
+                instrument_type=get_instrument_type_from_symbol(position["symbol"]),
+            )
+            logger.info(
+                f"Margin MPP Converted: SL-M->SL-LMT, Trigger={trigger}, FinalPrice={protected}"
+            )
+            return converted_order_type, str(protected)
+        except Exception as e:
+            logger.error(
+                f"Margin MPP Error: SL-M leg for Symbol={position['symbol']}, "
+                f"Error={e}. Using the trigger price as-is."
+            )
+            return converted_order_type, fallback_price
 
     logger.info(
         f"Margin MPP: {original_type} detected Symbol={position['symbol']}, "

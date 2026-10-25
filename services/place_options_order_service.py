@@ -262,6 +262,9 @@ def place_options_order(
                 "trigger_price": options_data.get("trigger_price", 0.0),
                 "disclosed_quantity": options_data.get("disclosed_quantity", 0),
                 "underlying_ltp": underlying_ltp,  # Pass LTP for execution reference
+                # Caller-chosen Market Price Protection % - carried on EVERY split
+                # leg so the whole order protects at the same rate. None = slab.
+                "mpp_percentage": options_data.get("mpp_percentage"),
             }
 
             # Process split orders sequentially with rate limiting
@@ -353,6 +356,8 @@ def place_options_order(
             "trigger_price": options_data.get("trigger_price", 0.0),
             "disclosed_quantity": options_data.get("disclosed_quantity", 0),
             "underlying_ltp": underlying_ltp,  # Pass LTP for execution reference
+            # Caller-chosen Market Price Protection % (None = built-in slab).
+            "mpp_percentage": options_data.get("mpp_percentage"),
         }
 
         # Step 3: Place the order using the standard place_order service

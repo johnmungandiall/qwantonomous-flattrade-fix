@@ -3,7 +3,12 @@
 
 from database.token_db import get_br_symbol, get_symbol_info
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price, get_instrument_type_from_symbol
+from utils.mpp_slab import (
+    calculate_protected_price,
+    custom_percentage_from,
+    get_instrument_type_from_symbol,
+    slm_protected_price,
+)
 
 logger = get_logger(__name__)
 
@@ -91,6 +96,7 @@ def transform_data(data, token, auth_token=None):
                         symbol=data["symbol"],
                         instrument_type=instrument_type,
                         tick_size=tick_size,
+                        custom_percentage=custom_percentage_from(data),
                     )
                     price = str(protected_price)
                     order_type = "LIMIT"
@@ -125,12 +131,15 @@ def transform_data(data, token, auth_token=None):
                 if symbol_info and symbol_info.tick_size:
                     tick_size = symbol_info.tick_size
 
-                protected_price = calculate_protected_price(
-                    price=tp,
+                # Trigger-anchored: the limit must sit strictly beyond the SL-M
+                # trigger (BUY above, SELL below), which the shared helper owns.
+                protected_price = slm_protected_price(
                     action=action,
+                    trigger=tp,
+                    tick_size=tick_size,
+                    custom_percentage=custom_percentage_from(data),
                     symbol=data["symbol"],
                     instrument_type=instrument_type,
-                    tick_size=tick_size,
                 )
                 price = str(protected_price)
                 order_type = "STOPLOSS"

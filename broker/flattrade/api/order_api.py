@@ -7,6 +7,7 @@ import time
 
 from broker.flattrade.mapping.order_data import normalize_order_status
 from broker.flattrade.mapping.transform_data import (
+    MPPPriceUnavailable,
     map_product_type,
     reverse_map_product_type,
     transform_data,
@@ -691,11 +692,17 @@ def modify_order(data, auth):
     full_api_key = os.getenv("BROKER_API_KEY")
     api_key = full_api_key.split(":::")[0]
 
+    # Keep data["symbol"] in OpenAlgo format: the MPP conversion inside
+    # transform_modify_order_data needs it for the quote, slab and tick-size
+    # lookups. The transform derives the broker symbol itself via get_br_symbol.
     token = get_token(data["symbol"], data["exchange"])
-    data["symbol"] = get_br_symbol(data["symbol"], data["exchange"])
     data["apikey"] = api_key
 
-    transformed_data = transform_modify_order_data(data, token)
+    try:
+        transformed_data = transform_modify_order_data(data, token, AUTH_TOKEN)
+    except (MPPPriceUnavailable, ValueError) as error:
+        logger.error(f"Modify order NOT sent for {data.get('symbol')}: {error}")
+        return {"status": "error", "message": str(error)}, 400
     # Set up the request headers
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     payload = "jData=" + json.dumps(transformed_data) + "&jKey=" + AUTH_TOKEN

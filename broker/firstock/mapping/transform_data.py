@@ -5,9 +5,24 @@ import os
 
 from database.token_db import get_br_symbol, get_symbol_info
 from utils.logging import get_logger
-from utils.mpp_slab import calculate_protected_price, get_instrument_type_from_symbol
+from utils.mpp_slab import (
+    calculate_protected_price,
+    custom_percentage_from,
+    get_instrument_type_from_symbol,
+    slm_protected_price,
+)
 
 logger = get_logger(__name__)
+
+
+def _tick_size_from_master(symbol, exchange):
+    """Tick size from the instrument master (Firstock's quote omits it)."""
+    try:
+        info = get_symbol_info(symbol, exchange)
+        return getattr(info, "tick_size", None)
+    except Exception as error:
+        logger.error(f"MPP: tick size lookup failed for {symbol}@{exchange}: {error}")
+        return None
 
 
 def transform_data(data, token, auth_token=None):
@@ -52,7 +67,26 @@ def transform_data(data, token, auth_token=None):
             f"Exchange={data['exchange']}, Action={action}"
         )
         try:
-            if auth_token:
+            if original_type == "SL-M":
+                # A stop-limit must sit strictly beyond its own trigger, so an
+                # SL-M prices off the TRIGGER and never off the LTP. It also
+                # needs no quote: the master contract owns the tick size.
+                protected_price = slm_protected_price(
+                    action=action,
+                    trigger=float(data.get("trigger_price") or 0),
+                    tick_size=_tick_size_from_master(data["symbol"], data["exchange"]),
+                    custom_percentage=custom_percentage_from(data),
+                    symbol=data["symbol"],
+                    instrument_type=get_instrument_type_from_symbol(data["symbol"]),
+                )
+                price = str(protected_price)
+                order_type = "SL-LMT"
+                logger.info(
+                    f"MPP SL-M Conversion Complete: Symbol={data['symbol']}, "
+                    f"Trigger={data.get('trigger_price')}, "
+                    f"OrderType={original_type}->{order_type}, FinalPrice={protected_price}"
+                )
+            elif auth_token:
                 # Lazy import to avoid circular dependency
                 from broker.firstock.api.data import BrokerData
 
@@ -86,9 +120,12 @@ def transform_data(data, token, auth_token=None):
                         symbol=data["symbol"],
                         instrument_type=instrument_type,
                         tick_size=tick_size,
+                        custom_percentage=custom_percentage_from(data),
                     )
                     price = str(protected_price)
-                    order_type = "LMT" if original_type == "MARKET" else "SL-LMT"
+                    # Only MARKET reaches this path; SL-M was priced off its own
+                    # trigger above.
+                    order_type = "LMT"
                     logger.info(
                         f"MPP Conversion Complete: Symbol={data['symbol']}, "
                         f"OrderType={original_type}->{order_type}, FinalPrice={protected_price}"
@@ -201,16 +238,36 @@ def transform_modify_order_data(data, token, auth_token=None):
 
                     ltp = float(quote_data.get("ltp", 0))
 
-                    if ltp > 0:
+                    # SL-M keeps its limit beyond its OWN trigger; only MARKET
+                    # prices off the LTP.
+                    if original_type == "SL-M":
+                        protected_price = slm_protected_price(
+                            action=action,
+                            trigger=float(data.get("trigger_price") or 0),
+                            tick_size=tick_size,
+                            custom_percentage=custom_percentage_from(data),
+                            symbol=oa_symbol,
+                            instrument_type=instrument_type,
+                        )
+                        price = str(protected_price)
+                        order_type = "SL-LMT"
+                        logger.info(
+                            f"Modify MPP SL-M Conversion Complete: Symbol={oa_symbol}, "
+                            f"Trigger={data.get('trigger_price')}, "
+                            f"OrderType={original_type}->{order_type}, "
+                            f"FinalPrice={protected_price}"
+                        )
+                    elif ltp > 0:
                         protected_price = calculate_protected_price(
                             price=ltp,
                             action=action,
                             symbol=oa_symbol,
                             instrument_type=instrument_type,
                             tick_size=tick_size,
+                            custom_percentage=custom_percentage_from(data),
                         )
                         price = str(protected_price)
-                        order_type = "LMT" if original_type == "MARKET" else "SL-LMT"
+                        order_type = "LMT"
                         logger.info(
                             f"Modify MPP Conversion Complete: {original_type}->"
                             f"{order_type}, FinalPrice={protected_price}"
