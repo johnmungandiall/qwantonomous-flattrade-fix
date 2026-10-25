@@ -87,6 +87,17 @@ ACTION_SELL = "SELL"  # Sell
 
 VALID_ACTIONS = [ACTION_BUY, ACTION_SELL]
 
+# Order Validity (time-in-force / Noren `ret`)
+# DAY = the order rests until the session ends (legacy behaviour, the default).
+# IOC = Immediate-or-Cancel: fill what the book allows right now and cancel the
+# remainder, so a marketable limit can never sit unfilled behind the touch.
+VALIDITY_DAY = "DAY"
+VALIDITY_IOC = "IOC"
+
+VALID_VALIDITY = [VALIDITY_DAY, VALIDITY_IOC]
+
+DEFAULT_VALIDITY = VALIDITY_DAY
+
 # Exchange Badge Colors (for UI)
 EXCHANGE_BADGE_COLORS = {
     EXCHANGE_NSE: "badge-accent",

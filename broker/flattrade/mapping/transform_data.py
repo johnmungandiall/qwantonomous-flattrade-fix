@@ -309,7 +309,7 @@ def transform_data(data, token, auth_token=None):
         "trantype": "B" if action == "BUY" else "S",
         "prctyp": order_type,
         "mkt_protection": "0",
-        "ret": "DAY",
+        "ret": _retention(data),
         "ordersource": "API",
     }
 
@@ -317,6 +317,24 @@ def transform_data(data, token, auth_token=None):
     safe_log = {k: v for k, v in transformed.items() if k not in ("uid", "actid")}
     logger.info(f"Transformed order data: {safe_log}")
     return transformed
+
+
+def _retention(data):
+    """Noren order retention (`ret`): ``DAY`` or ``IOC``, clamped.
+
+    OpenAlgo's schema normalises and validates ``validity`` before the order
+    reaches a mapper, but a mapper is also reachable from internal callers that
+    assemble the dict themselves (smart-order exit branch, close_all_positions,
+    modify). Clamping here means an unknown string can never reach the OMS -
+    which would reject the order - and an absent value keeps the legacy DAY
+    retention every existing install relies on.
+
+    IOC matters for exits: a MARKET order is rewritten to a marketable LIMIT, so
+    with DAY retention an unfilled remainder would REST behind the touch instead
+    of being cancelled.
+    """
+    value = str((data or {}).get("validity") or "").strip().upper()
+    return value if value in ("DAY", "IOC") else "DAY"
 
 
 def transform_modify_order_data(data, token, auth_token=None):
@@ -406,7 +424,7 @@ def transform_modify_order_data(data, token, auth_token=None):
         "prc": price,
         "qty": str(data["quantity"]),
         "tsym": symbol,
-        "ret": "DAY",
+        "ret": _retention(data),
         "dscqty": str(data.get("disclosed_quantity") or 0),
     }
 

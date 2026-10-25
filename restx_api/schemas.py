@@ -1,6 +1,11 @@
 from marshmallow import EXCLUDE, Schema, ValidationError, fields, post_load, pre_load, validate
 
-from utils.constants import CRYPTO_EXCHANGES, VALID_EXCHANGES
+from utils.constants import (
+    CRYPTO_EXCHANGES,
+    DEFAULT_VALIDITY,
+    VALID_EXCHANGES,
+    VALID_VALIDITY,
+)
 
 
 def _validate_mpp_percentage(value):
@@ -40,7 +45,60 @@ def _coerce_quantity_to_int(data):
     return data
 
 
-class OrderSchema(Schema):
+# ── Order validity (time-in-force) ───────────────────────────────────────────
+# "IOC" (Immediate-or-Cancel) is what stops a marketable-LIMIT order from
+# resting unfilled; "DAY" is the legacy retention every mapper used to hardcode.
+# The value has to survive every layer (schema -> service -> broker mapper)
+# instead of being hardcoded to DAY in each of them.
+def _normalise_validity(data):
+    """Up-case ``validity`` before field validation.
+
+    Marshmallow validators cannot mutate the value they check, so 'day' / 'ioc'
+    are normalised in a pre_load hook. An explicit ``None`` means "the caller did
+    not decide" and is replaced by the default, exactly like omitting the key.
+    """
+    if not isinstance(data, dict) or "validity" not in data:
+        return data
+    value = data.get("validity")
+    if value is None:
+        data["validity"] = DEFAULT_VALIDITY
+    elif isinstance(value, str):
+        data["validity"] = value.strip().upper()
+    return data
+
+
+def _validate_validity(value):
+    """Reject any validity this platform does not model.
+
+    Kept a dedicated validator (like ``_validate_mpp_percentage``) so the error
+    names the accepted values instead of marshmallow's generic "Must be one of".
+    """
+    if value not in VALID_VALIDITY:
+        raise ValidationError(
+            f"validity must be one of: {', '.join(VALID_VALIDITY)} (case insensitive)"
+        )
+
+
+class ValiditySchemaMixin:
+    """Adds the normalised ``validity`` field to an order schema.
+
+    A mixin (not one shared ``fields`` instance) because marshmallow binds every
+    field to the schema that declares it. Marshmallow resolves ``pre_load`` hooks
+    across the MRO, so each schema mixing this in gets the DAY/IOC rule exactly
+    once instead of five copy-pasted pre_load methods.
+    """
+
+    validity = fields.Str(
+        missing=DEFAULT_VALIDITY,
+        validate=_validate_validity,
+    )  # Order validity: DAY (default) or IOC
+
+    @pre_load
+    def _normalise_validity_field(self, data, **kwargs):
+        return _normalise_validity(data)
+
+
+class OrderSchema(ValiditySchemaMixin, Schema):
     apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))
     strategy = fields.Str(required=True)
     exchange = fields.Str(required=True, validate=validate.OneOf(VALID_EXCHANGES))
@@ -76,7 +134,7 @@ class OrderSchema(Schema):
         return _coerce_quantity_to_int(data)
 
 
-class SmartOrderSchema(Schema):
+class SmartOrderSchema(ValiditySchemaMixin, Schema):
     apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))
     strategy = fields.Str(required=True)
     exchange = fields.Str(required=True, validate=validate.OneOf(VALID_EXCHANGES))
@@ -111,7 +169,7 @@ class SmartOrderSchema(Schema):
         return _coerce_quantity_to_int(data)
 
 
-class ModifyOrderSchema(Schema):
+class ModifyOrderSchema(ValiditySchemaMixin, Schema):
     apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))
     strategy = fields.Str(required=True)
     exchange = fields.Str(required=True, validate=validate.OneOf(VALID_EXCHANGES))
@@ -161,7 +219,7 @@ class CancelAllOrderSchema(Schema):
     strategy = fields.Str(required=True)
 
 
-class BasketOrderItemSchema(Schema):
+class BasketOrderItemSchema(ValiditySchemaMixin, Schema):
     exchange = fields.Str(required=True, validate=validate.OneOf(VALID_EXCHANGES))
     symbol = fields.Str(required=True)
     action = fields.Str(required=True, validate=validate.OneOf(["BUY", "SELL", "buy", "sell"]))
@@ -200,7 +258,7 @@ class BasketOrderSchema(Schema):
     )  # List of order details
 
 
-class SplitOrderSchema(Schema):
+class SplitOrderSchema(ValiditySchemaMixin, Schema):
     apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))
     strategy = fields.Str(required=True)
     exchange = fields.Str(required=True, validate=validate.OneOf(VALID_EXCHANGES))

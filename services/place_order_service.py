@@ -12,6 +12,7 @@ from utils.constants import (
     VALID_EXCHANGES,
     VALID_PRICE_TYPES,
     VALID_PRODUCT_TYPES,
+    VALID_VALIDITY,
 )
 from utils.event_bus import bus
 from utils.logging import get_logger
@@ -105,6 +106,25 @@ def validate_order_data(data: dict[str, Any]) -> tuple[bool, dict[str, Any] | No
             None,
             f"Invalid product type. Must be one of: {', '.join(VALID_PRODUCT_TYPES)}",
         )
+
+    # Validate order validity (DAY / IOC). The schema normalises and checks this
+    # field too, but this function is also the validation entry point for callers
+    # that assemble an order dict WITHOUT going through the schema (internal
+    # services, tests), so the same rule is enforced here. An absent key means
+    # "legacy DAY" and is not an error - only a present, invalid value is.
+    if "validity" in data:
+        raw_validity = data["validity"]
+        normalised_validity = (
+            raw_validity.strip().upper() if isinstance(raw_validity, str) else raw_validity
+        )
+        if normalised_validity not in VALID_VALIDITY:
+            return (
+                False,
+                None,
+                f"Invalid validity. Must be one of: {', '.join(VALID_VALIDITY)} "
+                f"(case insensitive)",
+            )
+        data["validity"] = normalised_validity
 
     # Validate and deserialize input
     try:
