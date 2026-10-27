@@ -3,9 +3,24 @@
 
 from database.symbol import SymToken
 from database.token_db import get_br_symbol
+from utils.constants import DEFAULT_VALIDITY, VALID_VALIDITY
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _duration(data):
+    """mStock order retention (`duration`): ``DAY`` or ``IOC``, clamped.
+
+    OpenAlgo's schema normalises and validates ``validity`` before an order
+    reaches a mapper, but a mapper is also reachable from internal callers that
+    assemble the dict themselves (smart-order exit branch, close_all_positions,
+    modify). Clamping here means an unknown string can never reach the OMS -
+    which would reject the order - and an absent value keeps the legacy DAY
+    retention every existing install relies on.
+    """
+    value = str((data or {}).get("validity") or "").strip().upper()
+    return value if value in VALID_VALIDITY else DEFAULT_VALIDITY
 
 
 def get_mstock_symbol(symbol: str, exchange: str) -> str:
@@ -92,7 +107,7 @@ def transform_data(data, token):
         "stoploss": "0",
         "trailingStopLoss": "",
         "disclosedquantity": str(disclosed_qty),
-        "duration": "DAY",
+        "duration": _duration(data),
         "ordertag": "",
     }
 
@@ -127,7 +142,7 @@ def transform_modify_order_data(data, token):
         "ordertype": map_order_type(data["pricetype"]),
         "quantity": str(data["quantity"]),
         "producttype": map_product_type(data["product"]),
-        "duration": "DAY",
+        "duration": _duration(data),
         "price": str(data.get("price", "0")),
         "triggerprice": str(data.get("trigger_price", "0")),
         "disclosedquantity": str(disclosed_qty),
